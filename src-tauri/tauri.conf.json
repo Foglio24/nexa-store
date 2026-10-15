@@ -1,0 +1,55 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Nexa Store",
+  "version": "0.5.0",
+  "identifier": "it.nexa.store",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Nexa Store",
+        "width": 1240,
+        "height": 820,
+        "minWidth": 860,
+        "minHeight": 600,
+        "backgroundColor": "#12151b"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data: https:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost; script-src 'self'",
+      "devCsp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data: https:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost http://127.0.0.1:1420 ws://127.0.0.1:1420; script-src 'self'"
+    },
+    "enableGTKAppId": true
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "deb"
+    ],
+    "category": "Utility",
+    "shortDescription": "App store for Ubuntu: APT, Flatpak and Snap in one place",
+    "longDescription": "Browse, search and manage applications from APT, Flatpak and Snap in a single app store, with a summary and a confirmation before every change. Installs keep going with the window closed and a notification tells you when they are done. The interface is in Italian.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/64x64.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png"
+    ],
+    "linux": {
+      "deb": {
+        "depends": [
+          "pkexec",
+          "apt",
+          "appstream"
+        ],
+        "desktopTemplate": "packaging/nexa-store.desktop"
+      }
+    }
+  }
+}

@@ -1,0 +1,173 @@
+//! Desktop notifications for operations that finish while the window is closed or not in use.
+//!
+//! Notifications go through the standard `org.freedesktop.Notifications` D-Bus service (GNOME
+//! Shell, KDE and others), so nothing is installed besides what the desktop already has. The text
+//! is plain: package names come from catalogs, so markup characters are escaped.
+use notify_rust::{Hint, Notification, Timeout};
+use std::{env, path::PathBuf};
+
+const APP_NAME: &str = "Nexa Store";
+/// Same text with an invisible character at the end. GNOME Shell links a notification to an app by
+/// its name too (it looks for `<name>.desktop`, and the package ships `Nexa Store.desktop`), and it
+/// deletes every notification of a linked app as soon as the sender leaves the bus. This name never
+/// matches a file, so a notification sent just before quitting stays until the user dismisses it.
+const APP_NAME_DETACHED: &str = "Nexa Store\u{200b}";
+const ICON: &str = "nexa-store";
+/// Added to the "installed" message of a Flatpak app when the session cannot see its launcher yet.
+pub const MENU_HINT: &str = "Se non compare nel menu delle app, esci e rientra nella sessione una volta: intanto aprila da Nexa Store.";
+const MAX_LABEL: usize = 60;
+/// Desktop-entry ids the app can be installed under: the package, the project launcher script and
+/// the per-user launcher. The id lets the desktop attribute the notification to the app and open
+/// it when the notification is clicked.
+const DESKTOP_IDS: [&str; 4] = ["it.nexa.store", "it.nexa.store.local", "nexa-store", "Nexa Store"];
+
+fn data_directories() -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    match env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|path| path.is_absolute()) {
+        Some(path) => directories.push(path),
+        None => if let Some(home) = env::var_os("HOME") { directories.push(PathBuf::from(home).join(".local/share")); },
+    }
+    let system = env::var("XDG_DATA_DIRS").unwrap_or_default();
+    let system = if system.is_empty() { "/usr/local/share:/usr/share".to_string() } else { system };
+    directories.extend(system.split(':').filter(|path| path.starts_with('/')).map(PathBuf::from));
+    directories
+}
+
+/// The first of our desktop entries that exists, without the `.desktop` suffix.
+pub fn desktop_entry() -> Option<String> {
+    let directories = data_directories();
+    DESKTOP_IDS.iter().find(|id| directories.iter().any(|directory| directory.join("applications").join(format!("{id}.desktop")).is_file())).map(|id| id.to_string())
+}
+
+fn escape(text: &str) -> String {
+    let short: String = text.chars().filter(|c| !c.is_control()).take(MAX_LABEL).collect();
+    short.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// Title and text announcing that an operation has ended.
+pub fn finished_message(action: &str, label: &str, success: bool) -> (String, String) {
+    let label = escape(label);
+    if !success {
+        let summary = if action == "refresh" { format!("Controllo {label} non riuscito") } else { format!("{label}: operazione non riuscita") };
+        return (summary, "Apri Nexa Store per vedere i dettagli.".into());
+    }
+    match action {
+        "install" => (format!("{label} installata"), "L'installazione è terminata.".into()),
+        "remove" => (format!("{label} rimossa"), "La rimozione è terminata.".into()),
+        "update" => (format!("{label} aggiornata"), "L'aggiornamento è terminato.".into()),
+        _ => (format!("Controllo {label} terminato"), "Nexa Store ha finito di aggiornare gli elenchi.".into()),
+    }
+}
+
+/// Title and text shown when the window is closed while an operation is still running.
+pub fn background_message(action: &str, label: &str) -> (String, String) {
+    let label = escape(label);
+    let doing = match action {
+        "install" => format!("Installazione di {label}"),
+        "remove" => format!("Rimozione di {label}"),
+        "update" => format!("Aggiornamento di {label}"),
+        _ => format!("Controllo {label}"),
+    };
+    ("Nexa Store continua in background".into(), format!("{doing} in corso: ti avviso appena termina."))
+}
+
+/// How a notification relates to the app that sent it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Delivery {
+    /// Linked to the app: its banner opens the app when clicked, but GNOME Shell deletes it as soon
+    /// as the app exits. For notifications sent while the app keeps running.
+    Attached,
+    /// Not linked to any app: it stays in the notification list after the app has exited, like
+    /// `notify-send`. For the final notification of an app that quits right after sending it.
+    Detached,
+}
+
+fn identity(delivery: Delivery) -> (&'static str, Option<String>) {
+    match delivery {
+        Delivery::Attached => (APP_NAME, desktop_entry()),
+        Delivery::Detached => (APP_NAME_DETACHED, None),
+    }
+}
+
+/// Show a notification. Returns whether some notification service accepted it; a missing service
+/// (for example in a bare session) is not an error for the operation itself. The standard D-Bus
+/// route is tried first, then the `notify-send` tool, which Ubuntu ships with its desktop.
+pub fn send(summary: &str, body: &str, delivery: Delivery) -> bool {
+    let (name, entry) = identity(delivery);
+    let mut notification = Notification::new();
+    notification.appname(name).summary(summary).body(body).icon(ICON).timeout(Timeout::Milliseconds(12_000))
+        .hint(Hint::Category("transfer.complete".into()));
+    if let Some(id) = entry { notification.hint(Hint::DesktopEntry(id)); }
+    match notification.show() {
+        Ok(_) => true,
+        Err(error) => {
+            eprintln!("Nexa Store: notifica D-Bus non riuscita ({error}); provo con notify-send");
+            send_with_tool(summary, body, delivery)
+        }
+    }
+}
+
+fn send_with_tool(summary: &str, body: &str, delivery: Delivery) -> bool {
+    let (name, entry) = identity(delivery);
+    let mut command = std::process::Command::new("notify-send");
+    command.args(["--app-name", name, "--icon", ICON, "--expire-time", "12000", "--category", "transfer.complete"]);
+    if let Some(id) = entry { command.args(["--hint", &format!("string:desktop-entry:{id}")]); }
+    command.args(["--", summary, body]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    command.status().map(|status| status.success()).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn messages_describe_each_action_and_failure() {
+        assert_eq!(finished_message("install", "GIMP", true).0, "GIMP installata");
+        assert_eq!(finished_message("remove", "GIMP", true).0, "GIMP rimossa");
+        assert_eq!(finished_message("update", "GIMP", true).0, "GIMP aggiornata");
+        assert_eq!(finished_message("refresh", "APT", true).0, "Controllo APT terminato");
+        let (summary, body) = finished_message("install", "GIMP", false);
+        assert_eq!(summary, "GIMP: operazione non riuscita");
+        assert!(body.contains("Apri Nexa Store"));
+        assert_eq!(finished_message("refresh", "Snap", false).0, "Controllo Snap non riuscito");
+        let (title, text) = background_message("install", "GIMP");
+        assert_eq!(title, "Nexa Store continua in background");
+        assert_eq!(text, "Installazione di GIMP in corso: ti avviso appena termina.");
+        assert!(background_message("remove", "x").1.starts_with("Rimozione di x"));
+    }
+
+    #[test]
+    fn a_detached_notification_has_no_app_link_of_any_kind() {
+        let (name, entry) = identity(Delivery::Detached);
+        assert!(entry.is_none(), "no desktop-entry");
+        assert!(name.starts_with("Nexa Store") && name != "Nexa Store", "the name must not match any .desktop file");
+        assert_eq!(name.chars().filter(|c| !c.is_whitespace() && *c != '\u{200b}').collect::<String>(), "NexaStore", "it still reads \"Nexa Store\" on screen");
+        assert_eq!(identity(Delivery::Attached).0, "Nexa Store");
+    }
+
+    #[test]
+    fn package_names_cannot_inject_markup_or_flood_the_notification() {
+        let (summary, _) = finished_message("install", "<b>evil</b> & \u{7}co", true);
+        assert!(!summary.contains('<') && !summary.contains('\u{7}'), "{summary}");
+        assert!(summary.contains("&lt;b&gt;evil") && summary.contains("&amp;"));
+        let long = "a".repeat(500);
+        assert!(finished_message("install", &long, true).0.chars().count() < 90);
+    }
+
+    #[test]
+    #[ignore = "shows real notifications on the desktop session; run with NEXA_NOTIFY_DELIVERY=attached|detached"]
+    fn real_notification_by_delivery_for_the_exit_experiment() {
+        let delivery = if std::env::var("NEXA_NOTIFY_DELIVERY").as_deref() == Ok("detached") { Delivery::Detached } else { Delivery::Attached };
+        let (summary, body) = finished_message("install", &format!("Prova {delivery:?}"), true);
+        assert!(send(&summary, &body, delivery));
+        // The process ends right here, as the app does after the last notification of a background install.
+    }
+
+    #[test]
+    #[ignore = "shows a real notification on the desktop session"]
+    fn real_notification_is_accepted_by_the_desktop() {
+        let (summary, body) = finished_message("install", "Prova Nexa Store", true);
+        println!("desktop entry: {:?}", desktop_entry());
+        assert!(send(&summary, &body, Delivery::Attached));
+    }
+}

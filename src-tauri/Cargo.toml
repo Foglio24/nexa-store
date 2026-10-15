@@ -1,0 +1,32 @@
+[package]
+name = "nexa-store"
+version = "0.5.0"
+description = "Nexa Store: an app store for Ubuntu (APT, Flatpak and Snap)"
+license = "MIT"
+repository = "https://github.com/Foglio24/nexa-store"
+authors = ["Nexa Store"]
+edition = "2021"
+rust-version = "1.90"
+
+[lib]
+name = "nexa_store_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+getrandom = "0.2"
+flate2 = "1"
+base64 = "0.22"
+quick-xml = "0.42"
+tauri-plugin-single-instance = "2"
+notify-rust = "4"
+
+[profile.release]
+strip = true
+opt-level = "s"
+

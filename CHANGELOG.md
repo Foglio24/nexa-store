@@ -1,0 +1,57 @@
+# Changelog
+
+## 0.5.0 — 2026-10-15
+
+Background installs that you can actually see.
+
+- **The final notification no longer disappears.** GNOME Shell deletes an app's notifications as soon as the app leaves the D-Bus. The store sent the "installed" notification and quit right away, so the notification was deleted about a second later, before it could be seen. A notification sent just before quitting is now not linked to the app and stays until dismissed. The background test proves it on the D-Bus.
+- **Installed Flatpak apps now show up.** With Flatpak 1.18 the ref printed by `flatpak list` has no `app/` prefix, and the parser silently dropped every installed Flatpak app. They were missing from *Installed*, cards showed *Install* for apps that were already there, and they could not be removed or updated from the store.
+- **Open button** on installed apps (cards, lists, details): starts the Flatpak, Snap or APT app without going through the application menu. A command-line-only snap gets a clear message instead.
+- **Application-menu notice**: if the session started before the first Flatpak was installed, Flatpak apps do not appear in the menu, the dock or the search until the next login. The store now says so and repeats it in the end-of-install notification.
+- `scripts/test-background.py` checks that the final notification is not deleted after the app exits.
+
+## 0.4.1 — 2026-10-15
+
+- **End-of-operation notification is always sent.** Before, it was skipped when the window was open and focused, so installing with the store open produced no notification at all. It now arrives for success and failure alike; if D-Bus does not answer, `notify-send` is tried.
+- **Dock icon fixed.** The window identifies itself as `nexa-store`, but the `.desktop` file declared `StartupWMClass=it.nexa.store`, so the shell did not match them and showed a generic icon. Fixed in the package template, in `install-launcher.sh` and in the documentation.
+- **New macOS-style icon**: squircle shape, blue gradient with a highlight and an inner rim; same symbol (a shopping bag with an "N").
+- `scripts/test-background.py` also checks the notification with the window open.
+
+## 0.4.0 — 2026-10-15
+
+Operations that keep going with the window closed, with notifications.
+
+- **You can close Nexa Store while it installs, removes or updates.** The window hides, the operation continues, one notification says it goes on in the background and another says when it is done; then the app quits by itself. If the operation fails, the window comes back with the details.
+- **Execution independent of the app.** Operations that change the system write their output to a private temporary file and run in their own process group. Before, the output went through pipes owned by the app, so stopping the app could kill APT half-way (SIGPIPE).
+- The confirmation dialog and the Operations page remind you that you can close the window.
+- New `scripts/test-background.py`; new dependency `notify-rust` (it uses the D-Bus stack already included).
+
+## 0.3.0 — 2026-10-15
+
+New look and a new Explore page.
+
+- **The interface was redesigned like an ordinary app store**: always-visible search bar, cards with logos, light and dark themes following the system, the Ubuntu font. Slogans and promotional text were removed.
+- **Explore**: a rotating highlighted app, ten **categories** (Games, Internet, Audio & video, Graphics & photo, Office, Development, Education, Science, Utilities, System) and **new proposals on every launch**, with a "show more apps" button. Three different category sections on every visit.
+- **Category page** with every app from the three sources, A–Z or random order, a source filter and paging.
+- **One card per app** even if it is in APT, Flatpak and Snap; the source is chosen in the details. Italian names and summaries when available; APT shows the app's name instead of the package name.
+- **Search**: GIMP now ranks above its plugins, the App/Package counts are per app, technical packages stay apart.
+- **Details**: the real AppStream description for Flatpak apps (it used to show the output of `flatpak info`), text that reflows to the window width, no repeated title.
+- **New store icon**, used in the app, the package and the menu.
+- Updates: a **Snap** button to list updates (`snap refresh --list`, read-only).
+- Fixed a WebKitGTK painting glitch that left a black square in the window corner after scrolling (caused by a CSS `filter` effect).
+- `scripts/test-gui.py` updated for the new interface.
+
+## 0.2.0 — 2026-10-15
+
+- Added the Snap source: search, details, installed apps and per-package updates, with install, remove and update behind a preview and a confirmation, and a state re-check before running.
+- Snap operations are limited to strict apps from the stable channel; classic, devmode and system components are excluded. No global Snap refresh.
+- Added the **Apps**, **Technical packages** and **All** categories: by default only everyday apps are listed, while libraries, data, documentation, runtimes and system components stay under technical packages, and every result shows its type.
+- Classification is based on AppStream metadata (APT), `app/…` refs (Flatpak) and the type declared by snapd; a package is not an "app" just because it has an icon.
+- Every app shows its **logo**: raster icons read locally from AppStream, the icon theme and installed snap folders, or the Snap Store https icon. A neutral icon appears when a logo does not exist or fails to load. SVGs are never used.
+
+## 0.1.0 — 2026-10-15
+
+- First desktop version for Ubuntu with Tauri 2, React, TypeScript and Rust.
+- APT and Flatpak search and management with preview, confirmation and a session log.
+- APT simulation and safeguards, single-use expiring plans and explicit Flatpak scopes.
+- Added the `.deb` package, the Ubuntu setup script and the per-user launcher.

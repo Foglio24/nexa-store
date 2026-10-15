@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name={{name}}
+GenericName=App store
+Comment={{comment}}
+Exec={{exec}}
+Icon={{icon}}
+Terminal=false
+Categories=System;PackageManager;
+Keywords=store;app;apps;software;apt;flatpak;snap;negozio;applicazioni;
+StartupWMClass=nexa-store
