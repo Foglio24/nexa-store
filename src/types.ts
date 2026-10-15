@@ -1,12 +1,12 @@
-export type PackageSource = 'apt' | 'flatpak' | 'snap';
+export type PackageSource = 'apt' | 'flatpak' | 'snap' | 'appimage';
 export type SourceFilter = PackageSource | 'all';
 export type PackageKind = 'application' | 'package';
 export type KindFilter = PackageKind | 'all';
 export type View = 'explore' | 'installed' | 'updates' | 'activity';
 export type Action = 'install' | 'remove' | 'update' | 'refresh';
 export type CategoryId =
-  | 'giochi' | 'internet' | 'audio-video' | 'grafica' | 'ufficio'
-  | 'sviluppo' | 'istruzione' | 'scienza' | 'utilita' | 'sistema';
+  | 'games' | 'internet' | 'audio-video' | 'graphics' | 'office'
+  | 'development' | 'education' | 'science' | 'utilities' | 'system';
 
 export interface StorePackage {
   id: string;
@@ -32,6 +32,8 @@ export interface SystemInfo {
   aptAvailable: boolean;
   flatpakAvailable: boolean;
   snapAvailable: boolean;
+  /** AppImage needs no tool of its own, so this is always true; its catalog may still be empty. */
+  appimageAvailable: boolean;
   flatpakRemotes: string[];
   /** User Flatpak launchers are not visible to this session until the next login. */
   flatpakMenuHidden: boolean;

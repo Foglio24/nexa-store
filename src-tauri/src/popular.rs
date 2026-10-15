@@ -80,7 +80,7 @@ mod tests {
     fn exact_and_prefix_entries_match_normalised_names() {
         assert!(is_popular(&name_key("GIMP")));
         assert!(is_popular(&name_key("Visual Studio Code")));
-        assert!(is_popular(&name_key("LibreOffice Writer")), "prefisso LibreOffice*");
+        assert!(is_popular(&name_key("LibreOffice Writer")), "prefix entry LibreOffice*");
         assert!(!is_popular(&name_key("Gimpshop clone")), "entries without * must match in full");
         assert!(!is_popular(&name_key("kube-apiserver")));
         assert!(!is_popular(""));

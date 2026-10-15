@@ -18,6 +18,6 @@ export const StoreContext = createContext<StoreActions | null>(null);
 
 export function useStore(): StoreActions {
   const value = useContext(StoreContext);
-  if (!value) throw new Error('StoreContext mancante');
+  if (!value) throw new Error('StoreContext is missing');
   return value;
 }

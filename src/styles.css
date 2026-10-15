@@ -227,6 +227,7 @@ h1, h2, h3, h4, p { margin: 0; }
 .source-badge.apt .source-dot { background: #e48a1f; }
 .source-badge.flatpak .source-dot { background: #4a86e8; }
 .source-badge.snap .source-dot { background: #2fa86a; }
+.source-badge.appimage .source-dot { background: #9b5de5; }
 .source-list.inline { flex-wrap: nowrap; gap: 10px; }
 .source-badge.inline { height: auto; padding: 0; background: none; border-radius: 0; font-size: 11.5px; font-weight: 600; gap: 5px; white-space: nowrap; }
 .on-dark .source-badge { background: rgb(255 255 255 / 0.18); color: #fff; }

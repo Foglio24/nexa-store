@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0 — 2026-10-15
+
+AppImage, and an interface in English and Italian.
+
+- **New source: AppImage.** A catalog of about 2,900 apps from [AppImageHub](https://appimage.github.io) (the projects hosted on GitHub), searchable and browsable like the other sources, with the same app appearing once when it also exists in APT, Flatpak or Snap. Install, update, remove and open, per user, in `~/.local/share/nexa-store/appimages/`, with a launcher in the application menu and no administrator password.
+- **Verified downloads.** The AppImage comes from the project's latest stable GitHub release, over https, from GitHub hosts only (checked on every redirect). Its size and the SHA-256 GitHub publishes for it must match, and it must have the AppImage file header, before it becomes executable. The confirmation lists the file, the size, the checksum and says plainly that an AppImage is not sandboxed.
+- **The interface follows the system language**: Italian when the system language is Italian, English for every other language, resolved like gettext (`LC_ALL`, `LC_MESSAGES`, `LANG`, `LANGUAGE`). `NEXA_LANG=it|en` overrides it. The backend messages (confirmations, errors, notifications) follow it too, and so do app names and descriptions from the catalogs.
+- Internal category ids are now English (`games`, `graphics`, …), and the "Graphics & photo" category is called "Graphics" in English.
+- The `.desktop` file has an Italian generic name, comment and keywords; the package recommends `libfuse2t64` so AppImages start directly.
+- New checks: `npm run test:i18n`, `scripts/test-language.py` (the app against ten locale settings), `scripts/test-appimage.py` (a real install and removal in an isolated folder); `scripts/test-gui.py` and `scripts/test-background.py` run in English or Italian.
+- The README documents the language handling and the AppImage source.
+
 ## 0.5.0 — 2026-10-15
 
 Background installs that you can actually see.

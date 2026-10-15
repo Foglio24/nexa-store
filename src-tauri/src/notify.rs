@@ -14,7 +14,7 @@ const APP_NAME: &str = "Nexa Store";
 const APP_NAME_DETACHED: &str = "Nexa Store\u{200b}";
 const ICON: &str = "nexa-store";
 /// Added to the "installed" message of a Flatpak app when the session cannot see its launcher yet.
-pub const MENU_HINT: &str = "Se non compare nel menu delle app, esci e rientra nella sessione una volta: intanto aprila da Nexa Store.";
+pub fn menu_hint() -> String { tr!("If it does not show up in the app menu, log out and back in once; meanwhile open it from Nexa Store.") }
 const MAX_LABEL: usize = 60;
 /// Desktop-entry ids the app can be installed under: the package, the project launcher script and
 /// the per-user launcher. The id lets the desktop attribute the notification to the app and open
@@ -48,27 +48,27 @@ fn escape(text: &str) -> String {
 pub fn finished_message(action: &str, label: &str, success: bool) -> (String, String) {
     let label = escape(label);
     if !success {
-        let summary = if action == "refresh" { format!("Controllo {label} non riuscito") } else { format!("{label}: operazione non riuscita") };
-        return (summary, "Apri Nexa Store per vedere i dettagli.".into());
+        let summary = if action == "refresh" { tr!("Check of {} failed", label) } else { tr!("{}: operation failed", label) };
+        return (summary, tr!("Open Nexa Store to see the details."));
     }
     match action {
-        "install" => (format!("{label} installata"), "L'installazione è terminata.".into()),
-        "remove" => (format!("{label} rimossa"), "La rimozione è terminata.".into()),
-        "update" => (format!("{label} aggiornata"), "L'aggiornamento è terminato.".into()),
-        _ => (format!("Controllo {label} terminato"), "Nexa Store ha finito di aggiornare gli elenchi.".into()),
+        "install" => (tr!("{} installed", label), tr!("The installation has finished.")),
+        "remove" => (tr!("{} removed", label), tr!("The removal has finished.")),
+        "update" => (tr!("{} updated", label), tr!("The update has finished.")),
+        _ => (tr!("Check of {} finished", label), tr!("Nexa Store has finished updating the lists.")),
     }
 }
 
 /// Title and text shown when the window is closed while an operation is still running.
 pub fn background_message(action: &str, label: &str) -> (String, String) {
     let label = escape(label);
-    let doing = match action {
-        "install" => format!("Installazione di {label}"),
-        "remove" => format!("Rimozione di {label}"),
-        "update" => format!("Aggiornamento di {label}"),
-        _ => format!("Controllo {label}"),
+    let text = match action {
+        "install" => tr!("Installing {}. You'll get a notification as soon as it ends.", label),
+        "remove" => tr!("Removing {}. You'll get a notification as soon as it ends.", label),
+        "update" => tr!("Updating {}. You'll get a notification as soon as it ends.", label),
+        _ => tr!("Checking {}. You'll get a notification as soon as it ends.", label),
     };
-    ("Nexa Store continua in background".into(), format!("{doing} in corso: ti avviso appena termina."))
+    (tr!("Nexa Store keeps going in the background"), text)
 }
 
 /// How a notification relates to the app that sent it.
@@ -101,7 +101,7 @@ pub fn send(summary: &str, body: &str, delivery: Delivery) -> bool {
     match notification.show() {
         Ok(_) => true,
         Err(error) => {
-            eprintln!("Nexa Store: notifica D-Bus non riuscita ({error}); provo con notify-send");
+            eprintln!("Nexa Store: D-Bus notification failed ({error}); trying notify-send");
             send_with_tool(summary, body, delivery)
         }
     }
@@ -122,18 +122,36 @@ mod tests {
 
     #[test]
     fn messages_describe_each_action_and_failure() {
-        assert_eq!(finished_message("install", "GIMP", true).0, "GIMP installata");
-        assert_eq!(finished_message("remove", "GIMP", true).0, "GIMP rimossa");
-        assert_eq!(finished_message("update", "GIMP", true).0, "GIMP aggiornata");
-        assert_eq!(finished_message("refresh", "APT", true).0, "Controllo APT terminato");
+        assert_eq!(finished_message("install", "GIMP", true).0, "GIMP installed");
+        assert_eq!(finished_message("remove", "GIMP", true).0, "GIMP removed");
+        assert_eq!(finished_message("update", "GIMP", true).0, "GIMP updated");
+        assert_eq!(finished_message("refresh", "APT", true).0, "Check of APT finished");
         let (summary, body) = finished_message("install", "GIMP", false);
-        assert_eq!(summary, "GIMP: operazione non riuscita");
-        assert!(body.contains("Apri Nexa Store"));
-        assert_eq!(finished_message("refresh", "Snap", false).0, "Controllo Snap non riuscito");
+        assert_eq!(summary, "GIMP: operation failed");
+        assert!(body.contains("Open Nexa Store"));
+        assert_eq!(finished_message("refresh", "Snap", false).0, "Check of Snap failed");
         let (title, text) = background_message("install", "GIMP");
-        assert_eq!(title, "Nexa Store continua in background");
-        assert_eq!(text, "Installazione di GIMP in corso: ti avviso appena termina.");
-        assert!(background_message("remove", "x").1.starts_with("Rimozione di x"));
+        assert_eq!(title, "Nexa Store keeps going in the background");
+        assert_eq!(text, "Installing GIMP. You'll get a notification as soon as it ends.");
+        assert!(background_message("remove", "x").1.starts_with("Removing x"));
+    }
+
+    #[test]
+    fn messages_follow_the_interface_language() {
+        crate::i18n::with_language(crate::i18n::Lang::It, || {
+            assert_eq!(finished_message("install", "GIMP", true).0, "GIMP installata");
+            assert_eq!(finished_message("remove", "GIMP", true).0, "GIMP rimossa");
+            assert_eq!(finished_message("update", "GIMP", true).0, "GIMP aggiornata");
+            assert_eq!(finished_message("refresh", "APT", true).0, "Controllo APT terminato");
+            let (summary, body) = finished_message("install", "GIMP", false);
+            assert_eq!(summary, "GIMP: operazione non riuscita");
+            assert!(body.contains("Apri Nexa Store"));
+            assert_eq!(finished_message("refresh", "Snap", false).0, "Controllo Snap non riuscito");
+            let (title, text) = background_message("install", "GIMP");
+            assert_eq!(title, "Nexa Store continua in background");
+            assert_eq!(text, "Installazione di GIMP in corso: ti avviso appena termina.");
+            assert!(background_message("remove", "x").1.starts_with("Rimozione di x"));
+        });
     }
 
     #[test]
@@ -158,7 +176,7 @@ mod tests {
     #[ignore = "shows real notifications on the desktop session; run with NEXA_NOTIFY_DELIVERY=attached|detached"]
     fn real_notification_by_delivery_for_the_exit_experiment() {
         let delivery = if std::env::var("NEXA_NOTIFY_DELIVERY").as_deref() == Ok("detached") { Delivery::Detached } else { Delivery::Attached };
-        let (summary, body) = finished_message("install", &format!("Prova {delivery:?}"), true);
+        let (summary, body) = finished_message("install", &format!("Test {delivery:?}"), true);
         assert!(send(&summary, &body, delivery));
         // The process ends right here, as the app does after the last notification of a background install.
     }
@@ -166,7 +184,7 @@ mod tests {
     #[test]
     #[ignore = "shows a real notification on the desktop session"]
     fn real_notification_is_accepted_by_the_desktop() {
-        let (summary, body) = finished_message("install", "Prova Nexa Store", true);
+        let (summary, body) = finished_message("install", "Nexa Store test", true);
         println!("desktop entry: {:?}", desktop_entry());
         assert!(send(&summary, &body, Delivery::Attached));
     }

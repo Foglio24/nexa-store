@@ -139,11 +139,12 @@ fn display_text(value: &str, limit: usize) -> String {
     text.chars().take(limit).collect()
 }
 
-/// Per-language values of a translatable DEP-11 field. Italian wins over the default.
+/// Per-language values of a translatable DEP-11 field. Italian is used only when the interface is
+/// Italian; every other language gets the default (English) text.
 #[derive(Default, Clone)]
 struct Localized { default: String, italian: String }
 impl Localized {
-    fn best(&self) -> String { if self.italian.is_empty() { self.default.clone() } else { self.italian.clone() } }
+    fn best(&self) -> String { if self.italian.is_empty() || !crate::i18n::italian() { self.default.clone() } else { self.italian.clone() } }
 }
 
 #[derive(Default)]
@@ -743,7 +744,7 @@ pub fn warm_up() {
 }
 
 /// Description of the component `wanted` in a Flatpak AppStream stream: paragraphs separated by
-/// blank lines, list items as bullets. Italian wins over the default language when present.
+/// blank lines, list items as bullets. Italian is used when the interface is Italian and the catalog has it.
 fn parse_flatpak_description(input: impl BufRead, wanted: &str) -> io::Result<Option<String>> {
     let mut reader = Reader::from_reader(input);
     reader.config_mut().trim_text(false);
@@ -802,7 +803,7 @@ fn parse_flatpak_description(input: impl BufRead, wanted: &str) -> io::Result<Op
                 if element.name().as_ref() == "component" && component.as_ref().map(|(d, _)| *d) == Some(depth) {
                     component = None;
                     if id == wanted {
-                        let blocks = if italian_blocks.is_empty() { &default_blocks } else { &italian_blocks };
+                        let blocks = if italian_blocks.is_empty() || !crate::i18n::italian() { &default_blocks } else { &italian_blocks };
                         let mut result = String::new();
                         for (index, line) in blocks.iter().enumerate() {
                             if index > 0 { result.push_str(if line.starts_with("• ") && blocks[index - 1].starts_with("• ") { "\n" } else { "\n\n" }); }
@@ -893,6 +894,9 @@ fn snap_icon(id: &str) -> Option<String> {
     theme_icon(&[id.to_string()])
 }
 
+/// A raster image inside `root` as a data URI (same limits and checks as the catalog icons).
+pub fn image_in(path: &Path, root: &Path) -> Option<String> { image_data(path, root) }
+
 /// Return a local image as a data URI. No network request or shell is involved.
 pub fn local_icon(source: &str, id: &str, scope: Option<&str>, remote: Option<&str>) -> Option<String> {
     match source { "apt" => apt_icon(id), "flatpak" => flatpak_icon(id, scope, remote), "snap" => snap_icon(id), _ => None }
@@ -933,9 +937,12 @@ mod tests {
     }
 
     #[test]
-    fn dep11_display_fields_prefer_italian_and_ignore_nested_blocks() {
+    fn dep11_display_fields_prefer_italian_only_in_an_italian_interface_and_ignore_nested_blocks() {
+        use crate::i18n::{with_language, Lang};
         let input = b"---\nType: desktop-application\nID: org.gimp.GIMP\nPackage: gimp\nName:\n  C: GNU Image Manipulation Program\n  it: Programma di ritocco\n  de: Bildbearbeitung\nSummary:\n  C: \"Create \\\"images\\\"\"\nCategories:\n- Graphics\n- 2DGraphics\nKeywords:\n  C:\n  - Photoshop\nDescription:\n  C: >-\n  Name: finto\n---\nType: desktop-application\nID: tom.desktop\nPackage: tom\nName:\n  C: 'Tom''s App'\nSummary:\n  C: >-\n    folded text is not interpreted\n---\nType: addon\nPackage: gimp-data\nName:\n  C: Not an app\n";
-        let parsed = parse_metadata(BufReader::new(&input[..]), 8192, 100).unwrap();
+        let english = with_language(Lang::En, || parse_metadata(BufReader::new(&input[..]), 8192, 100).unwrap());
+        assert_eq!(english.apps["gimp"].name, "GNU Image Manipulation Program", "other languages get the default text");
+        let parsed = with_language(Lang::It, || parse_metadata(BufReader::new(&input[..]), 8192, 100).unwrap());
         let gimp = &parsed.apps["gimp"];
         assert_eq!(gimp.name, "Programma di ritocco");
         assert_eq!(gimp.summary, "Create \"images\"");
@@ -967,8 +974,12 @@ mod tests {
         let chat = &parsed[0];
         assert!(chat.application);
         assert_eq!(chat.name.default, "Chat & Talk");
-        assert_eq!(chat.name.best(), "Chiacchiere é");
-        assert_eq!(chat.summary.best(), "Dì ciao");
+        assert_eq!(chat.name.best(), "Chat & Talk");
+        assert_eq!(chat.summary.best(), "Say hi");
+        crate::i18n::with_language(crate::i18n::Lang::It, || {
+            assert_eq!(chat.name.best(), "Chiacchiere é");
+            assert_eq!(chat.summary.best(), "Dì ciao");
+        });
         assert_eq!(chat.categories, vec!["Network", "Chat"]);
         assert_eq!(chat.id, "org.example.Chat");
         assert!(!parsed[1].application);
@@ -986,9 +997,12 @@ mod tests {
               <p>Second paragraph.</p>
             </description>
           </component></components>"#;
-        let default = parse_flatpak_description(BufReader::new(xml.as_bytes()), "org.example.Chat").unwrap().unwrap();
+        let default = crate::i18n::with_language(crate::i18n::Lang::It, || parse_flatpak_description(BufReader::new(xml.as_bytes()), "org.example.Chat").unwrap().unwrap());
         assert!(default.starts_with("Parla e condividi."), "{default}");
         assert!(default.contains("• Veloce"), "{default}");
+        let plain = parse_flatpak_description(BufReader::new(xml.as_bytes()), "org.example.Chat").unwrap().unwrap();
+        assert!(plain.starts_with("Talk & share."), "{plain}");
+        assert!(plain.contains("• Fast") && !plain.contains("Veloce"), "{plain}");
         assert_eq!(parse_flatpak_description(BufReader::new(xml.as_bytes()), "org.example.Missing").unwrap(), None);
         let english = r#"<components><component type="desktop-application"><id>a.b.C</id><description><p>One.</p><p>Two &amp; three.</p><ul><li>x</li><li>y</li></ul></description></component></components>"#;
         assert_eq!(parse_flatpak_description(BufReader::new(english.as_bytes()), "a.b.C").unwrap().unwrap(), "One.\n\nTwo & three.\n\n• x\n• y");
@@ -1003,8 +1017,10 @@ mod tests {
             <description xml:lang="de"><p>Deutsch.</p></description></component>
           <component type="desktop-application"><id>org.example.NoItalian</id>
             <description xml:lang="fr"><p>Français.</p></description><description><p>Only default.</p></description></component></components>"#;
-        assert_eq!(parse_flatpak_description(BufReader::new(xml.as_bytes()), "org.gimp.GIMP").unwrap().unwrap(), "Testo italiano.");
-        assert_eq!(parse_flatpak_description(BufReader::new(xml.as_bytes()), "org.example.NoItalian").unwrap().unwrap(), "Only default.");
+        let italian = |id: &str| crate::i18n::with_language(crate::i18n::Lang::It, || parse_flatpak_description(BufReader::new(xml.as_bytes()), id).unwrap().unwrap());
+        assert_eq!(italian("org.gimp.GIMP"), "Testo italiano.");
+        assert_eq!(italian("org.example.NoItalian"), "Only default.");
+        assert_eq!(parse_flatpak_description(BufReader::new(xml.as_bytes()), "org.gimp.GIMP").unwrap().unwrap(), "English text.\n\n• One", "an English interface never shows the Italian text");
     }
 
     #[test]

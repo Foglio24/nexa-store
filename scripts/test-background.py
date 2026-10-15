@@ -14,7 +14,8 @@ Real notifications appear on the desktop during the run. Needs Python 3, tauri-d
 WebKitWebDriver, dbus-monitor, xprop, a graphical session, snapd and the release binary.
 Usage: python3 scripts/test-background.py   (NEXA_TAURI_DRIVER=/path/to/tauri-driver if it is not in PATH)
 
-The interface and the notifications are in Italian, so the strings checked below are Italian.
+The language of the interface and of the notifications follows the system; the script runs the app in
+English unless NEXA_LANG=it is set, and checks the texts of that language.
 """
 import base64, ctypes, ctypes.util, json, os, shutil, subprocess, sys, threading, time, urllib.request, urllib.error
 from pathlib import Path
@@ -176,7 +177,12 @@ def start_session():
     wait('return !!document.querySelector(".hero-body h2")', 90)
 
 
-env = dict(os.environ, GDK_BACKEND='x11')
+LANGUAGE = os.environ.get('NEXA_LANG', 'en')
+TEXT = {
+    'en': {'updates': 'Updates', 'background': 'Nexa Store keeps going in the background', 'check': 'Check of Snap', 'finished': 'finished'},
+    'it': {'updates': 'Aggiornamenti', 'background': 'Nexa Store continua in background', 'check': 'Controllo Snap', 'finished': 'terminato'},
+}[LANGUAGE]
+env = dict(os.environ, GDK_BACKEND='x11', NEXA_LANG=LANGUAGE)
 watch = NotificationWatch()
 ok = False
 try:
@@ -193,7 +199,7 @@ try:
     # ---- 2. With an operation running, the window is hidden and the work finishes in background.
     since_scenario_2 = len(watch.lines)
     start_session()
-    js('[...document.querySelectorAll(".nav-item")].find(b=>b.getAttribute("aria-label")==="Aggiornamenti").click()')
+    js('[...document.querySelectorAll(".nav-item")].find(b=>b.getAttribute("aria-label")==="' + TEXT['updates'] + '").click()')
     wait('return !!document.querySelector(".toolbar")', 60)
     assert js('return [...document.querySelectorAll(".toolbar button")].some(b=>b.textContent.trim()==="Snap")'), 'snapd is not available'
     js('[...document.querySelectorAll(".toolbar button")].find(b=>b.textContent.trim()==="Snap").click()')
@@ -212,8 +218,8 @@ try:
     time.sleep(7)  # GNOME Shell deletes a notification linked to the app about a second after the app leaves the bus
     summaries, ids, closed = watch.events(since_scenario_2)
     note('notifications sent to the desktop', summaries)
-    assert 'Nexa Store continua in background' in summaries, summaries
-    final = next((text for text in summaries if text.startswith('Controllo Snap') and 'terminato' in text), None)
+    assert TEXT['background'] in summaries, summaries
+    final = next((text for text in summaries if text.startswith(TEXT['check']) and TEXT['finished'] in text), None)
     assert final, summaries
     closed_ids = [notification for notification, reason in closed]
     note('final notification after the app exits: the shell does not delete it', {'id': ids[final], 'closures_seen': closed})
@@ -222,7 +228,7 @@ try:
     # ---- 3. With the window open and in use the user must be told too: a silent install feels broken.
     start_session()
     mark = len(watch.lines)
-    js('[...document.querySelectorAll(".nav-item")].find(b=>b.getAttribute("aria-label")==="Aggiornamenti").click()')
+    js('[...document.querySelectorAll(".nav-item")].find(b=>b.getAttribute("aria-label")==="' + TEXT['updates'] + '").click()')
     wait('return !!document.querySelector(".toolbar")', 60)
     js('[...document.querySelectorAll(".toolbar button")].find(b=>b.textContent.trim()==="Snap").click()')
     wait('return document.querySelector("[data-testid=confirm-operation]")!==null', 60)
@@ -232,8 +238,8 @@ try:
     time.sleep(1.5)
     open_window = watch.summaries(since=mark)
     note('window open: the end-of-operation notification is still sent', open_window)
-    assert any(text.startswith('Controllo Snap') and 'terminato' in text for text in open_window), open_window
-    assert 'Nexa Store continua in background' not in open_window, 'no background notice with the window open'
+    assert any(text.startswith(TEXT['check']) and TEXT['finished'] in text for text in open_window), open_window
+    assert TEXT['background'] not in open_window, 'no background notice with the window open'
     assert app_pids(), 'with the window open the app must stay open'
     ok = True
 finally:

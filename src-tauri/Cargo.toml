@@ -1,7 +1,7 @@
 [package]
 name = "nexa-store"
-version = "0.5.0"
-description = "Nexa Store: an app store for Ubuntu (APT, Flatpak and Snap)"
+version = "0.6.0"
+description = "Nexa Store: an app store for Ubuntu (APT, Flatpak, Snap and AppImage)"
 license = "MIT"
 repository = "https://github.com/Foglio24/nexa-store"
 authors = ["Nexa Store"]
@@ -25,6 +25,8 @@ base64 = "0.22"
 quick-xml = "0.42"
 tauri-plugin-single-instance = "2"
 notify-rust = "4"
+sha2 = "0.10"
+ureq = { version = "2", default-features = false, features = ["tls"] }
 
 [profile.release]
 strip = true

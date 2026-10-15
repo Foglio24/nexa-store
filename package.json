@@ -1,8 +1,8 @@
 {
   "name": "nexa-store",
   "private": true,
-  "version": "0.5.0",
-  "description": "An app store for Ubuntu: APT, Flatpak and Snap in one place",
+  "version": "0.6.0",
+  "description": "An app store for Ubuntu: APT, Flatpak, Snap and AppImage in one place",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -16,7 +16,8 @@
     "tauri": "tauri",
     "desktop": "tauri dev",
     "package": "tauri build --bundles deb",
-    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml"
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:i18n": "node scripts/check-i18n.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

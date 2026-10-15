@@ -4,6 +4,7 @@
 //! those entries (same AppStream id, or same normalised name) so the frontend can show one
 //! card per app and let the user choose the source. Nothing here runs a package manager
 //! command except the read-only listings used to flag what is already installed.
+use crate::appimage;
 use crate::backend::{self, Package, Source};
 use crate::catalog::{self, CatalogApp};
 use crate::categories;
@@ -74,7 +75,7 @@ impl Group {
     fn has_category(&self, category: &str) -> bool { self.items.iter().any(|item| item.cats.contains(&category)) }
     fn installed(&self) -> bool { self.items.iter().any(|item| item.package.installed) }
     fn summary(&self) -> &str { self.items.iter().map(|item| item.package.summary.as_str()).find(|s| !s.is_empty()).unwrap_or("") }
-    fn primary_category(&self) -> &'static str { self.items.iter().find_map(|item| item.cats.first().copied()).unwrap_or("utilita") }
+    fn primary_category(&self) -> &'static str { self.items.iter().find_map(|item| item.cats.first().copied()).unwrap_or("utilities") }
 }
 
 // ---- Snap Store catalogue ---------------------------------------------------------------
@@ -132,8 +133,11 @@ fn snaps() -> Vec<Item> {
 
 /// Load every catalogue once, in the background, so the first visit to Explore is instant.
 pub fn warm_up() {
+    // The AppImage catalogue comes from the network: do not make the local ones wait for it.
+    let remote = std::thread::spawn(appimage::warm_up);
     catalog::warm_up();
     let _ = snaps();
+    let _ = remote.join();
 }
 
 // ---- Installed state --------------------------------------------------------------------
@@ -161,6 +165,8 @@ fn mark_installed(package: &mut Package, state: &Installed) {
     match package.source {
         Source::Apt => package.installed = state.apt.contains(&package.id),
         Source::Snap => package.installed = state.snap.contains(&package.id),
+        // AppImage entries already know whether they are installed (see `appimage::catalog_packages`).
+        Source::Appimage => {},
         Source::Flatpak => if let Some(installed) = state.flatpak.get(&package.id) {
             // Keep the display data, but use the installed reference and scope so removal works.
             package.id = installed.id.clone();
@@ -193,6 +199,16 @@ fn catalog_item(app: &CatalogApp, state: &Installed) -> Item {
 
 fn includes(source: &str, wanted: &str) -> bool { source == "all" || source == wanted }
 
+/// The AppImage catalogue as store items. Most of its apps are little known, so on the home page only
+/// the well-known ones are proposed; every app is still listed in its category and in search.
+fn appimage_items() -> Vec<Item> {
+    appimage::catalog_packages().into_iter().map(|package| {
+        let name_key = categories::name_key(&package.name);
+        let cats: Vec<&'static str> = package.categories.iter().filter_map(|c| categories::CATEGORY_IDS.iter().find(|id| *id == c).copied()).collect();
+        Item { has_icon: package.icon_url.is_some(), featurable: popular::is_popular(&name_key), cats, name_key, id_key: String::new(), package }
+    }).collect()
+}
+
 /// Apps of one category (or of any category when `category` is `None`), from the chosen sources.
 fn collect(category: Option<&str>, source: &str, state: &Installed) -> Vec<Item> {
     let matches = |cats: &[&'static str]| match category { Some(c) => cats.contains(&c), None => !cats.is_empty() };
@@ -208,6 +224,9 @@ fn collect(category: Option<&str>, source: &str, state: &Installed) -> Vec<Item>
             mark_installed(&mut item.package, state);
             items.push(item);
         }
+    }
+    if includes(source, "appimage") {
+        items.extend(appimage_items().into_iter().filter(|item| matches(&item.cats)));
     }
     items
 }
@@ -239,8 +258,8 @@ fn finish(groups: &[&Group]) -> Vec<Package> {
 // ---- Public commands --------------------------------------------------------------------
 
 pub fn browse_category(category: String, source: String, sort: String, seed: u64, offset: usize, limit: usize) -> Result<CategoryPage> {
-    if !categories::is_category(&category) { return Err("Categoria non valida.".into()); }
-    if !matches!(source.as_str(), "all" | "apt" | "flatpak" | "snap") { return Err("Sorgente non valida: usa all, apt, flatpak oppure snap.".into()); }
+    if !categories::is_category(&category) { return Err(tr!("Invalid category.")); }
+    if !matches!(source.as_str(), "all" | "apt" | "flatpak" | "snap" | "appimage") { return Err(tr!("Invalid source: use all, apt, flatpak, snap or appimage.")); }
     let state = installed_state();
     let mut groups = group(collect(Some(&category), &source, &state));
     if sort == "random" { Rng::new(seed).shuffle(&mut groups); }
@@ -352,10 +371,10 @@ mod tests {
     #[test]
     fn same_app_in_several_sources_forms_one_group() {
         let items = vec![
-            item(Source::Apt, "gimp", "GIMP", "org.gimp.gimp", &["grafica"], true, false),
-            item(Source::Flatpak, "org.gimp.GIMP", "GIMP", "org.gimp.gimp", &["grafica"], true, false),
-            item(Source::Snap, "gimp", "G.I.M.P", "", &["grafica"], true, false),
-            item(Source::Flatpak, "org.other.Draw", "Draw", "org.other.draw", &["grafica"], true, false),
+            item(Source::Apt, "gimp", "GIMP", "org.gimp.gimp", &["graphics"], true, false),
+            item(Source::Flatpak, "org.gimp.GIMP", "GIMP", "org.gimp.gimp", &["graphics"], true, false),
+            item(Source::Snap, "gimp", "G.I.M.P", "", &["graphics"], true, false),
+            item(Source::Flatpak, "org.other.Draw", "Draw", "org.other.draw", &["graphics"], true, false),
             item(Source::Apt, "vlc", "VLC", "vlc", &["audio-video"], true, false),
             item(Source::Snap, "vlc", "vlc", "", &["audio-video"], true, false),
         ];
@@ -374,8 +393,8 @@ mod tests {
                 items.push(item(Source::Flatpak, &format!("org.app{number}.App{index}"), &format!("App {number}-{index}"), &format!("org.app{number}.app{index}"), &[category], true, false));
             }
         }
-        items.push(item(Source::Apt, "noicon", "No icon", "", &["giochi"], false, false));
-        items.push(item(Source::Apt, "installed", "Installed", "", &["giochi"], true, true));
+        items.push(item(Source::Apt, "noicon", "No icon", "", &["games"], false, false));
+        items.push(item(Source::Apt, "installed", "Installed", "", &["games"], true, true));
         let groups = group(items);
         let plan = plan_home(&groups, &mut Rng::new(42));
         assert_eq!(plan.hero.len(), HERO_COUNT);
@@ -401,22 +420,22 @@ mod tests {
     fn home_prefers_known_apps_and_skips_server_components_and_technical_names() {
         let mut items = Vec::new();
         for index in 0..30 {
-            items.push(item(Source::Flatpak, &format!("org.x.Obscure{index}"), &format!("Obscure Tool {index}"), &format!("org.x.obscure{index}"), &["utilita"], true, false));
+            items.push(item(Source::Flatpak, &format!("org.x.Obscure{index}"), &format!("Obscure Tool {index}"), &format!("org.x.obscure{index}"), &["utilities"], true, false));
         }
         for name in ["Firefox", "VLC", "GIMP", "Inkscape", "Krita", "Blender", "Audacity", "Steam", "Kdenlive", "Okular", "Thunderbird", "Telegram Desktop"] {
-            items.push(item(Source::Apt, &name.to_lowercase(), name, "", &["utilita"], true, false));
+            items.push(item(Source::Apt, &name.to_lowercase(), name, "", &["utilities"], true, false));
         }
-        let mut server = item(Source::Snap, "kube-apiserver", "Kube Server", "", &["utilita"], true, false);
+        let mut server = item(Source::Snap, "kube-apiserver", "Kube Server", "", &["utilities"], true, false);
         server.featurable = false;
         items.push(server);
-        items.push(item(Source::Apt, "kube-scheduler", "kube-scheduler", "", &["utilita"], true, false));
+        items.push(item(Source::Apt, "kube-scheduler", "kube-scheduler", "", &["utilities"], true, false));
         let groups = group(items);
         let plan = plan_home(&groups, &mut Rng::new(5));
         let shown: Vec<&Group> = plan.hero.iter().chain(&plan.picks).map(|&i| &groups[i]).collect();
         assert!(shown.iter().all(|g| g.name != "Kube Server" && g.name != "kube-scheduler"));
         assert!(plan.hero.iter().all(|&i| groups[i].popular), "highlighted apps are well-known ones");
         let popular_picks = plan.picks.iter().filter(|&&i| groups[i].popular).count();
-        assert!(popular_picks >= PICK_POPULAR, "{popular_picks} note su {}", plan.picks.len());
+        assert!(popular_picks >= PICK_POPULAR, "{popular_picks} well-known apps out of {}", plan.picks.len());
         assert!(plan.picks.iter().any(|&i| !groups[i].popular), "there is room for random discoveries");
         assert!(looks_technical("kube-apiserver") && !looks_technical("Kube-Apiserver") && !looks_technical("Cool App"));
     }
@@ -444,13 +463,13 @@ mod tests {
             println!("{category:<12} groups={:<5} packages={:<3} with logo={:<3} sources={:?} {:?}", page.total, page.packages.len(), with_icon, sources, started.elapsed());
             assert!(page.total > 0, "{category} is empty");
         }
-        let snap_only = browse_category("giochi".into(), "snap".into(), "random".into(), 3, 0, 12).unwrap();
+        let snap_only = browse_category("games".into(), "snap".into(), "random".into(), 3, 0, 12).unwrap();
         println!("games, Snap only: {} groups, example {:?}", snap_only.total, snap_only.packages.iter().take(3).map(|p| &p.name).collect::<Vec<_>>());
     }
 
     #[test]
     fn category_page_arguments_are_validated() {
         assert!(browse_category("../etc".into(), "all".into(), "name".into(), 1, 0, 10).is_err());
-        assert!(browse_category("giochi".into(), "pip".into(), "name".into(), 1, 0, 10).is_err());
+        assert!(browse_category("games".into(), "pip".into(), "name".into(), 1, 0, 10).is_err());
     }
 }

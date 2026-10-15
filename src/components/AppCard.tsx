@@ -1,4 +1,5 @@
 import type { AppGroup } from '../types';
+import { useT } from '../i18n';
 import { sourcesOf } from '../lib/groups';
 import { groupLogo } from '../lib/util';
 import { useStore } from '../StoreContext';
@@ -8,17 +9,18 @@ import SourceBadge from './SourceBadge';
 
 /** Grid card used on Explore and on category pages. */
 export default function AppCard({ group }: { group: AppGroup }) {
+  const t = useT();
   const { openGroup } = useStore();
   return <article className="app-card">
-    <button className="app-card-main" onClick={() => openGroup(group)} aria-label={`Dettagli di ${group.name}`}>
+    <button className="app-card-main" onClick={() => openGroup(group)} aria-label={t('Details of {}', group.name)}>
       <AppIcon name={group.name} url={groupLogo(group)} size="lg" />
       <span className="app-card-text">
         <h3 className="app-name">{group.name}</h3>
-        <p className="app-summary">{group.summary || 'Descrizione non disponibile.'}</p>
+        <p className="app-summary">{group.summary || t('Description not available.')}</p>
       </span>
     </button>
     <div className="app-card-foot">
-      <div className="source-list inline" title="Sorgenti disponibili">{sourcesOf(group).map(source => <SourceBadge key={source} source={source} inline />)}</div>
+      <div className="source-list inline" title={t('Available sources')}>{sourcesOf(group).map(source => <SourceBadge key={source} source={source} inline />)}</div>
       <ActionButton group={group} />
     </div>
   </article>;

@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { AppGroup, KindFilter, SourceFilter, StorePackage } from '../types';
+import { useT } from '../i18n';
 import AppRow from '../components/AppRow';
 import PageHeader from '../components/PageHeader';
 import Segmented from '../components/Segmented';
@@ -14,6 +15,7 @@ import { useStore } from '../StoreContext';
 const normalise = (value: string) => value.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 
 export default function SearchPage({ query, sources, refreshTick }: { query: string; sources: SourceFilter[]; refreshTick: number }) {
+  const t = useT();
   const { desktop } = useStore();
   const [source, setSource] = useState<SourceFilter>('all');
   const [kind, setKind] = useState<KindFilter>('application');
@@ -34,18 +36,18 @@ export default function SearchPage({ query, sources, refreshTick }: { query: str
   if (!desktop) return <DesktopOnly />;
   const hidden = kind === 'application' ? counts.package : kind === 'package' ? counts.application : 0;
   return <div>
-    <PageHeader title={`Risultati per “${query}”`}
-      subtitle={request.loading && !request.data ? 'Ricerca in corso…' : `${groups.length} ${groups.length === 1 ? 'risultato' : 'risultati'}`}
+    <PageHeader title={t('Results for “{}”', query)}
+      subtitle={request.loading && !request.data ? t('Searching…') : groups.length === 1 ? t('1 result') : t('{} results', groups.length)}
       actions={<>
-        <Segmented label="Tipo" value={kind} onChange={setKind} options={[
-          { value: 'application', label: `App (${counts.application})` }, { value: 'package', label: `Pacchetti (${counts.package})` }, { value: 'all', label: 'Tutto' }]} />
-        <Segmented label="Sorgente" value={source} onChange={setSource} options={sources.map(value => ({ value, label: value === 'all' ? 'Tutte' : sourceLabels[value] }))} />
+        <Segmented label={t('Type')} value={kind} onChange={setKind} options={[
+          { value: 'application', label: t('Apps ({})', counts.application) }, { value: 'package', label: t('Packages ({})', counts.package) }, { value: 'all', label: t('Everything') }]} />
+        <Segmented label={t('Source')} value={source} onChange={setSource} options={sources.map(value => ({ value, label: value === 'all' ? t('All') : sourceLabels[value] }))} />
       </>} />
     {request.error ? <ErrorState message={request.error} onRetry={request.reload} />
       : request.loading && !request.data ? <SkeletonGrid rows count={6} />
-      : groups.length === 0 ? <EmptyState title={kind === 'application' ? 'Nessuna app trovata.' : kind === 'package' ? 'Nessun pacchetto tecnico trovato.' : 'Nessun risultato.'}
-          action={hidden > 0 ? <button className="btn btn-secondary" onClick={() => setKind('all')}>Mostra anche {hidden} {kind === 'application' ? 'pacchetti tecnici' : 'app'}</button> : undefined}>
-          {hidden > 0 ? 'Ci sono risultati di un altro tipo.' : 'Controlla il nome o prova con un\'altra sorgente.'}</EmptyState>
+      : groups.length === 0 ? <EmptyState title={kind === 'application' ? t('No apps found.') : kind === 'package' ? t('No technical packages found.') : t('No results.')}
+          action={hidden > 0 ? <button className="btn btn-secondary" onClick={() => setKind('all')}>{kind === 'application' ? t('Also show {} technical packages', hidden) : t('Also show {} apps', hidden)}</button> : undefined}>
+          {hidden > 0 ? t('There are results of another type.') : t('Check the name or try another source.')}</EmptyState>
       : <div className="rows" aria-busy={request.loading}>{groups.map(group => <AppRow key={group.key} group={group} mode="search" />)}</div>}
   </div>;
 }

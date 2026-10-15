@@ -1,8 +1,8 @@
 import type { AppGroup, PackageSource, StorePackage } from '../types';
 
 /** Order in which sources are preferred when the user has not chosen one. */
-export const sourceOrder: PackageSource[] = ['apt', 'flatpak', 'snap'];
-export const sourceLabels: Record<PackageSource, string> = { apt: 'APT', flatpak: 'Flatpak', snap: 'Snap' };
+export const sourceOrder: PackageSource[] = ['apt', 'flatpak', 'snap', 'appimage'];
+export const sourceLabels: Record<PackageSource, string> = { apt: 'APT', flatpak: 'Flatpak', snap: 'Snap', appimage: 'AppImage' };
 
 const nameKey = (name: string) => name.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 const idKey = (id: string) => id.trim().toLowerCase().replace(/\.desktop$/, '');

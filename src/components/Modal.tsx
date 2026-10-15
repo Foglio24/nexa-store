@@ -1,10 +1,12 @@
 import { useEffect, useRef, type ReactNode } from 'react';
 import { X } from 'lucide-react';
+import { useT } from '../i18n';
 
 /** Accessible dialog: traps focus, closes on Escape or backdrop click unless `locked`. */
 export default function Modal({ title, onClose, children, wide = false, locked = false }: {
   title: string; onClose: () => void; children: ReactNode; wide?: boolean; locked?: boolean;
 }) {
+  const t = useT();
   const element = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -26,7 +28,7 @@ export default function Modal({ title, onClose, children, wide = false, locked =
   }, [onClose, locked]);
   return <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !locked) onClose(); }}>
     <div className={`modal ${wide ? 'modal-wide' : ''}`} role="dialog" aria-modal="true" aria-label={title} tabIndex={-1} ref={element}>
-      <button className="icon-button modal-close" aria-label="Chiudi finestra" onClick={onClose} disabled={locked}><X size={20} /></button>
+      <button className="icon-button modal-close" aria-label={t('Close window')} onClick={onClose} disabled={locked}><X size={20} /></button>
       {children}
     </div>
   </div>;

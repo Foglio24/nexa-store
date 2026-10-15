@@ -1,5 +1,8 @@
 use tauri::{window::Color, Manager};
 
+#[macro_use]
+pub mod i18n;
+pub mod appimage;
 pub mod backend;
 pub mod catalog;
 pub mod categories;
@@ -8,9 +11,12 @@ pub mod popular;
 pub mod store;
 
 async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
-    tauri::async_runtime::spawn_blocking(work).await.map_err(|e|format!("Operazione interna non riuscita: {e}"))?
+    tauri::async_runtime::spawn_blocking(work).await.map_err(|e| tr!("Internal operation failed: {}", e))?
 }
 
+/// `it` or `en`: the language of the interface, from the system language (see `i18n::detect`).
+#[tauri::command]
+fn app_language() -> &'static str { i18n::current().code() }
 #[tauri::command]
 async fn system_info() -> Result<backend::SystemInfo,String> { blocking(backend::system_info).await }
 #[tauri::command]
@@ -73,7 +79,7 @@ async fn finish_operation(app: &tauri::AppHandle, info: &backend::OperationInfo,
     if next.notify {
         let (summary, mut body) = notify::finished_message(&info.action, &info.label, success);
         if success && info.action == "install" && info.source == "flatpak" && backend::flatpak_menu_hidden() {
-            body = format!("{body} {}", notify::MENU_HINT);
+            body = format!("{body} {}", notify::menu_hint());
         }
         // Quitting right after notifying: GNOME Shell would delete a notification linked to the app the
         // moment it leaves the bus, so send one that stays until the user dismisses it.
@@ -144,14 +150,14 @@ pub fn run() {
                     std::thread::spawn(move || {
                         let (summary, body) = match info {
                             Some(info) => notify::background_message(&info.action, &info.label),
-                            None => ("Nexa Store continua in background".into(), "Un'operazione è ancora in corso: ti avviso appena termina.".into()),
+                            None => (tr!("Nexa Store keeps going in the background"), tr!("An operation is still running. You'll get a notification as soon as it ends.")),
                         };
                         notify::send(&summary, &body, notify::Delivery::Attached);
                     });
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![system_info,search_packages,list_installed,list_updates,package_details,prepare_operation,execute_operation,explore_home,browse_category,open_app])
+        .invoke_handler(tauri::generate_handler![app_language,system_info,search_packages,list_installed,list_updates,package_details,prepare_operation,execute_operation,explore_home,browse_category,open_app])
         .run(tauri::generate_context!())
-        .expect("Impossibile avviare Nexa Store");
+        .expect("cannot start Nexa Store");
 }

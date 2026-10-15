@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Nexa Store",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "identifier": "it.nexa.store",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -32,8 +32,8 @@
       "deb"
     ],
     "category": "Utility",
-    "shortDescription": "App store for Ubuntu: APT, Flatpak and Snap in one place",
-    "longDescription": "Browse, search and manage applications from APT, Flatpak and Snap in a single app store, with a summary and a confirmation before every change. Installs keep going with the window closed and a notification tells you when they are done. The interface is in Italian.",
+    "shortDescription": "App store for Ubuntu: APT, Flatpak, Snap and AppImage in one place",
+    "longDescription": "Browse, search and manage applications from APT, Flatpak, Snap and AppImage in a single app store, with a summary and a confirmation before every change. Installs keep going with the window closed and a notification tells you when they are done. The interface is in English, or in Italian when the system language is Italian.",
     "icon": [
       "icons/32x32.png",
       "icons/64x64.png",
@@ -47,6 +47,9 @@
           "pkexec",
           "apt",
           "appstream"
+        ],
+        "recommends": [
+          "libfuse2t64"
         ],
         "desktopTemplate": "packaging/nexa-store.desktop"
       }

@@ -2,10 +2,13 @@
 Type=Application
 Name={{name}}
 GenericName=App store
+GenericName[it]=Negozio di app
 Comment={{comment}}
+Comment[it]=Cerca, installa e gestisci app da APT, Flatpak, Snap e AppImage
 Exec={{exec}}
 Icon={{icon}}
 Terminal=false
 Categories=System;PackageManager;
-Keywords=store;app;apps;software;apt;flatpak;snap;negozio;applicazioni;
+Keywords=store;app;apps;software;apt;flatpak;snap;appimage;
+Keywords[it]=negozio;applicazioni;software;programmi;
 StartupWMClass=nexa-store

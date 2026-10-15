@@ -19,10 +19,12 @@ const OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 const PLAN_TTL: Duration = Duration::from_secs(120);
 static PLANS: OnceLock<Mutex<HashMap<String, Pending>>> = OnceLock::new();
 static MUTATING: AtomicBool = AtomicBool::new(false);
+/// Set when a timed-out process could not be killed: the mutation gate then stays locked until it exits.
+static PROCESS_HELD: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Source { Apt, Flatpak, Snap }
+pub enum Source { Apt, Flatpak, Snap, Appimage }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,7 +53,7 @@ pub struct Package {
     /// Normalised AppStream id, used to recognise the same app in another source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_id: Option<String>,
-    /// Store category ids (`giochi`, `grafica`, …).
+    /// Store category ids (`games`, `graphics`, …).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub categories: Vec<String>,
 }
@@ -66,6 +68,8 @@ pub struct SystemInfo {
     pub apt_available: bool,
     pub flatpak_available: bool,
     pub snap_available: bool,
+    /// AppImage needs no tool of its own: it is always available (its catalogue may not be loaded).
+    pub appimage_available: bool,
     pub flatpak_remotes: Vec<String>,
     /// User Flatpak apps are installed (or can be) but this session does not search their launcher
     /// folder, so they will not show up in the app menu until the next login.
@@ -118,12 +122,14 @@ impl Invocation {
 
 struct Captured { success: bool, text: String }
 
+fn truncation_note() -> String { tr!("\n[output truncated at 2 MiB]\n") }
+
 /// Wait for a child process. If an elevated process cannot be killed at the time limit, the mutation
 /// gate stays locked until that process really exits.
 fn wait_with_timeout(mut child: Child, timeout: Duration, mutation: bool) -> Result<ExitStatus> {
     let started = Instant::now();
     loop {
-        match child.try_wait().map_err(|e| format!("Errore di attesa del processo: {e}"))? {
+        match child.try_wait().map_err(|e| tr!("Error waiting for the process: {}", e))? {
             Some(status) => return Ok(status),
             None if started.elapsed() >= timeout => {
                 if child.kill().is_ok() {
@@ -131,13 +137,14 @@ fn wait_with_timeout(mut child: Child, timeout: Duration, mutation: bool) -> Res
                 } else {
                     // pkexec may have changed uid: don't permit a second mutation
                     // merely because the original elevated process timed out.
+                    PROCESS_HELD.store(true, Ordering::Release);
                     thread::spawn(move || {
                         let _ = child.wait();
                         if mutation { MUTATING.store(false, Ordering::Release); }
                     });
-                    return Err("Tempo massimo superato. Il processo è ancora attivo; nuove operazioni resteranno bloccate finché terminerà.".into());
+                    return Err(tr!("Time limit exceeded. The process is still running; new operations stay blocked until it ends."));
                 }
-                return Err("Tempo massimo del comando superato; il processo è stato interrotto. Verifica lo stato del gestore pacchetti prima di riprovare.".into());
+                return Err(tr!("The command exceeded its time limit and was stopped. Check the state of the package manager before trying again."));
             },
             None => thread::sleep(Duration::from_millis(40)),
         }
@@ -151,19 +158,19 @@ fn wait_with_timeout(mut child: Child, timeout: Duration, mutation: bool) -> Res
 fn run_detached(inv: &Invocation, timeout: Duration) -> Result<Captured> {
     use std::os::unix::{fs::OpenOptionsExt, process::CommandExt};
     let mut random = [0u8; 8];
-    getrandom::getrandom(&mut random).map_err(|e| format!("Impossibile preparare il file di output: {e}"))?;
+    getrandom::getrandom(&mut random).map_err(|e| tr!("Cannot prepare the output file: {}", e))?;
     let directory = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|p| p.is_absolute() && p.is_dir()).unwrap_or_else(std::env::temp_dir);
     let path = directory.join(format!("nexa-store-{}-{}.log", std::process::id(), random.iter().map(|b| format!("{b:02x}")).collect::<String>()));
     let file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)
-        .map_err(|e| format!("Impossibile creare il file di output: {e}"))?;
-    let errors = file.try_clone().map_err(|e| format!("Impossibile preparare il file di output: {e}"))?;
+        .map_err(|e| tr!("Cannot create the output file: {}", e))?;
+    let errors = file.try_clone().map_err(|e| tr!("Cannot prepare the output file: {}", e))?;
     let spawned = Command::new(&inv.program).args(&inv.args)
         .env("LC_ALL", "C").env("LANG", "C").env("TERM", "dumb")
         .stdin(Stdio::null()).stdout(Stdio::from(file)).stderr(Stdio::from(errors))
         .process_group(0).spawn();
     let child = match spawned {
         Ok(child) => child,
-        Err(e) => { let _ = fs::remove_file(&path); return Err(format!("Impossibile avviare {}: {e}", inv.program)); }
+        Err(e) => { let _ = fs::remove_file(&path); return Err(tr!("Cannot start {}: {}", inv.program, e)); }
     };
     let status = wait_with_timeout(child, timeout, true);
     let mut data = Vec::new();
@@ -172,7 +179,7 @@ fn run_detached(inv: &Invocation, timeout: Duration) -> Result<Captured> {
     let truncated = data.len() > OUTPUT_LIMIT;
     data.truncate(OUTPUT_LIMIT);
     let mut text = String::from_utf8_lossy(&data).to_string();
-    if truncated { text.push_str("\n[output troncato a 2 MiB]\n"); }
+    if truncated { text.push_str(&truncation_note()); }
     Ok(Captured { success: status?.success(), text })
 }
 
@@ -183,7 +190,7 @@ fn run(inv: &Invocation, timeout: Duration, mutation: bool) -> Result<Captured> 
     let mut child = Command::new(&inv.program).args(&inv.args)
         .env("LC_ALL", "C").env("LANG", "C").env("TERM", "dumb")
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .spawn().map_err(|e| format!("Impossibile avviare {}: {e}", inv.program))?;
+        .spawn().map_err(|e| tr!("Cannot start {}: {}", inv.program, e))?;
     let (tx, rx) = mpsc::channel();
     for pipe in [child.stdout.take().map(|x| Box::new(x) as Box<dyn Read + Send>),
         child.stderr.take().map(|x| Box::new(x) as Box<dyn Read + Send>)].into_iter().flatten() {
@@ -204,7 +211,7 @@ fn run(inv: &Invocation, timeout: Duration, mutation: bool) -> Result<Captured> 
                 }
             }
             let mut text = String::from_utf8_lossy(&data).to_string();
-            if truncated { text.push_str("\n[output troncato a 2 MiB]\n"); }
+            if truncated { text.push_str(&truncation_note()); }
             let _ = tx.send(text);
         });
     }
@@ -221,9 +228,9 @@ fn run(inv: &Invocation, timeout: Duration, mutation: bool) -> Result<Captured> 
 
 fn query(program: &str, args: &[&str]) -> Result<String> {
     let result = run(&Invocation::new(program, args), QUERY_TIMEOUT, false)?;
-    if result.text.contains("[output troncato a 2 MiB]") { return Err("La risposta del gestore pacchetti supera il limite di sicurezza. Restringi la ricerca.".into()); }
+    if result.text.contains(truncation_note().trim()) { return Err(tr!("The package manager's answer exceeds the safety limit. Narrow the search.")); }
     if result.success { Ok(result.text) } else {
-        Err(format!("{} non riuscito:\n{}", program, result.text.trim()))
+        Err(tr!("{} failed:\n{}", program, result.text.trim()))
     }
 }
 
@@ -232,15 +239,21 @@ fn ubuntu_info() -> (bool, String) {
     let content = fs::read_to_string("/etc/os-release").unwrap_or_default();
     let fields: HashMap<_, _> = content.lines().filter_map(|l| l.split_once('='))
         .map(|(k,v)| (k, v.trim_matches('"'))).collect();
-    (fields.get("ID") == Some(&"ubuntu"), fields.get("PRETTY_NAME").unwrap_or(&"Linux sconosciuto").to_string())
+    (fields.get("ID") == Some(&"ubuntu"), fields.get("PRETTY_NAME").map(|name| name.to_string()).unwrap_or_else(|| tr!("Unknown Linux")))
 }
 fn ensure_ubuntu() -> Result<()> {
-    if ubuntu_info().0 { Ok(()) } else { Err("Nexa Store supporta soltanto Ubuntu.".into()) }
+    if ubuntu_info().0 { Ok(()) } else { Err(tr!("Nexa Store only supports Ubuntu.")) }
 }
 
-fn selected(source: &str) -> Result<(bool, bool, bool)> {
-    match source { "all" => Ok((true,true,true)), "apt" => Ok((true,false,false)), "flatpak" => Ok((false,true,false)), "snap" => Ok((false,false,true)),
-        _ => Err("Sorgente non valida: usa all, apt, flatpak oppure snap.".into()) }
+#[derive(Clone, Copy)]
+struct Selection { apt: bool, flatpak: bool, snap: bool, appimage: bool }
+fn selected(source: &str) -> Result<Selection> {
+    let only = |apt, flatpak, snap, appimage| Ok(Selection { apt, flatpak, snap, appimage });
+    match source {
+        "all" => only(true, true, true, true), "apt" => only(true, false, false, false), "flatpak" => only(false, true, false, false),
+        "snap" => only(false, false, true, false), "appimage" => only(false, false, false, true),
+        _ => Err(tr!("Invalid source: use all, apt, flatpak, snap or appimage.")),
+    }
 }
 
 fn apt_id(id: &str) -> Result<()> {
@@ -248,7 +261,7 @@ fn apt_id(id: &str) -> Result<()> {
     if name.len() < 2 || id.len() > 255 || !name.as_bytes()[0].is_ascii_alphanumeric()
         || !name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"+.-".contains(&b))
         || arch.map(|s| s.is_empty() || !s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')).unwrap_or(false) {
-        return Err("Identificatore APT non valido.".into());
+        return Err(tr!("Invalid APT identifier."));
     }
     Ok(())
 }
@@ -256,12 +269,12 @@ fn apt_id(id: &str) -> Result<()> {
 fn flatpak_id(id: &str) -> Result<()> {
     if id.starts_with("app/") {
         let parts: Vec<_> = id.split('/').collect();
-        if parts.len() != 4 { return Err("Riferimento Flatpak non valido.".into()); }
+        if parts.len() != 4 { return Err(tr!("Invalid Flatpak reference.")); }
         flatpak_app_id(parts[1])?;
         for part in &parts[2..] {
             if part.is_empty() || part.len() > 128 || part.starts_with('-') ||
                 !part.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)) {
-                return Err("Architettura o ramo Flatpak non valido.".into());
+                return Err(tr!("Invalid Flatpak architecture or branch."));
             }
         }
         Ok(())
@@ -272,20 +285,20 @@ fn flatpak_app_id(id: &str) -> Result<()> {
     if id.len() < 3 || id.len() > 255 || !id.contains('.') || !id.as_bytes()[0].is_ascii_alphabetic()
         || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
         || id.split('.').any(str::is_empty) {
-        Err("Identificatore Flatpak non valido.".into())
+        Err(tr!("Invalid Flatpak identifier."))
     } else { Ok(()) }
 }
 
 fn remote_id(id: &str) -> Result<()> {
     if id.is_empty() || id.len() > 128 || !id.as_bytes()[0].is_ascii_alphanumeric()
         || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)) {
-        Err("Nome del repository Flatpak non valido.".into())
+        Err(tr!("Invalid Flatpak remote name."))
     } else { Ok(()) }
 }
 
 fn scope_arg(scope: Option<&str>) -> Result<&'static str> {
     match scope.unwrap_or("user") { "user" => Ok("--user"), "system" => Ok("--system"),
-        _ => Err("Ambito Flatpak non valido.".into()) }
+        _ => Err(tr!("Invalid Flatpak scope.")) }
 }
 pub(crate) fn base_id(id: &str) -> &str { id.split(':').next().unwrap_or(id) }
 pub(crate) fn app_id(id: &str) -> &str { if id.starts_with("app/") { id.split('/').nth(1).unwrap_or(id) } else { id } }
@@ -325,26 +338,27 @@ pub fn system_info() -> Result<SystemInfo> {
     let flatpak_available = available("/usr/bin/flatpak");
     let snap_available = available("/usr/bin/snap") && snap_get("/v2/system-info").is_ok();
     let mut warnings = Vec::new();
-    if !ubuntu { warnings.push("Sistema non supportato: è richiesto Ubuntu.".into()); }
-    if !available("/usr/bin/pkexec") { warnings.push("pkexec non disponibile: le operazioni APT richiedono policykit-1/pkexec.".into()); }
-    if !flatpak_available { warnings.push("Flatpak non è installato. La ricerca APT resta disponibile.".into()); }
-    if !snap_available { warnings.push("Snap non è disponibile: verifica snapd e il servizio /run/snapd.socket.".into()); }
+    if !ubuntu { warnings.push(tr!("Unsupported system: Ubuntu is required.")); }
+    if !available("/usr/bin/pkexec") { warnings.push(tr!("pkexec is not available: APT operations need policykit-1/pkexec.")); }
+    if !flatpak_available { warnings.push(tr!("Flatpak is not installed. The other sources are still available.")); }
+    if !snap_available { warnings.push(tr!("Snap is not available: check snapd and the /run/snapd.socket service.")); }
+    if crate::appimage::catalog_loaded() == Some(false) { warnings.push(tr!("The AppImage catalog could not be loaded (no connection?). AppImage search stays empty until it can.")); }
     let mut flatpak_remotes = Vec::new();
     if flatpak_available {
         match remotes() {
             Ok(rows) => {
                 if !rows.iter().any(|r| r.scope == "user") {
-                    warnings.push("Nessun repository Flatpak utente configurato. Per installare app Flatpak aggiungi prima un repository attendibile con flatpak --user remote-add.".into());
+                    warnings.push(tr!("No user Flatpak remote is configured. To install Flatpak apps, first add a trusted remote with flatpak --user remote-add."));
                 }
                 for r in rows {
-                    if !r.verified { warnings.push(format!("Repository Flatpak {}: verifica GPG disattivata; le operazioni saranno bloccate.", r.name)); }
+                    if !r.verified { warnings.push(tr!("Flatpak remote {}: GPG verification is disabled; operations will be blocked.", r.name)); }
                     flatpak_remotes.push(format!("{}:{}", r.scope, r.name));
                 }
             },
             Err(e) => warnings.push(e),
         }
     }
-    Ok(SystemInfo { ubuntu, os_name, apt_available, flatpak_available, snap_available, flatpak_remotes, flatpak_menu_hidden: flatpak_available && flatpak_menu_hidden(), warnings })
+    Ok(SystemInfo { ubuntu, os_name, apt_available, flatpak_available, snap_available, appimage_available: true, flatpak_remotes, flatpak_menu_hidden: flatpak_available && flatpak_menu_hidden(), warnings })
 }
 
 fn parse_dpkg(text: &str) -> Vec<Package> {
@@ -363,7 +377,7 @@ fn parse_apt_updates(text: &str) -> Vec<Package> {
         let (id, rest) = line.split_once('/')?;
         if !rest.contains("[upgradable from:") || apt_id(id).is_err() { return None; }
         let cols: Vec<_> = rest.split_whitespace().collect();
-        Some(Package { id: id.into(), name: id.into(), summary: "Aggiornamento APT disponibile".into(),
+        Some(Package { id: id.into(), name: id.into(), summary: tr!("APT update available"),
             version: cols.get(1).unwrap_or(&"").to_string(), source: Source::Apt,
             installed: true, update_available: true, remote: None, scope: None, publisher: None, channel: None, confinement: None, kind:default_package_kind(),icon_url:None,app_id:None,categories:Vec::new() })
     }).collect()
@@ -395,7 +409,7 @@ fn parse_control(text: &str) -> Vec<BTreeMap<String, String>> {
 fn validate_query(query: &str) -> Result<&str> {
     let query = query.trim();
     if query.chars().count() < 2 || query.len() > 120 || query.chars().any(char::is_control) {
-        Err("La ricerca deve contenere da 2 a 120 caratteri, senza caratteri di controllo.".into())
+        Err(tr!("The search must have 2 to 120 characters, with no control characters."))
     } else { Ok(query) }
 }
 fn regex_literal(value: &str) -> String {
@@ -520,74 +534,74 @@ pub(crate) fn uri_component(value: &str) -> String {
 }
 
 fn decode_http_response(data: &[u8]) -> Result<(u16, serde_json::Value)> {
-    let offset=data.windows(4).position(|s|s == b"\r\n\r\n").ok_or("Risposta HTTP snapd incompleta.")?;
-    if offset > 16384 { return Err("Intestazioni snapd oltre il limite consentito.".into()); }
-    let header=std::str::from_utf8(&data[..offset]).map_err(|_|"Intestazioni snapd non valide.")?;
+    let offset=data.windows(4).position(|s|s == b"\r\n\r\n").ok_or_else(|| tr!("Incomplete snapd HTTP response."))?;
+    if offset > 16384 { return Err(tr!("snapd headers exceed the allowed limit.")); }
+    let header=std::str::from_utf8(&data[..offset]).map_err(|_|tr!("Invalid snapd headers."))?;
     let mut lines=header.lines();
-    let status=lines.next().and_then(|l|l.split_whitespace().nth(1)).and_then(|s|s.parse::<u16>().ok()).ok_or("Stato HTTP snapd non valido.")?;
+    let status=lines.next().and_then(|l|l.split_whitespace().nth(1)).and_then(|s|s.parse::<u16>().ok()).ok_or_else(|| tr!("Invalid snapd HTTP status."))?;
     let fields: HashMap<String,String> = lines.filter_map(|l|l.split_once(':')).map(|(k,v)|(k.to_ascii_lowercase(),v.trim().to_ascii_lowercase())).collect();
     let body=&data[offset+4..];
     let mut decoded=Vec::new();
     if fields.get("transfer-encoding").map(String::as_str) == Some("chunked") {
         let mut pos=0;
         loop {
-            let end=body[pos..].windows(2).position(|s|s == b"\r\n").map(|n|pos+n).ok_or("Chunk HTTP snapd incompleto.")?;
-            let size=std::str::from_utf8(&body[pos..end]).ok().and_then(|s|usize::from_str_radix(s.split(';').next().unwrap_or(""),16).ok()).ok_or("Dimensione chunk snapd non valida.")?;
+            let end=body[pos..].windows(2).position(|s|s == b"\r\n").map(|n|pos+n).ok_or_else(|| tr!("Incomplete snapd HTTP chunk."))?;
+            let size=std::str::from_utf8(&body[pos..end]).ok().and_then(|s|usize::from_str_radix(s.split(';').next().unwrap_or(""),16).ok()).ok_or_else(|| tr!("Invalid snapd chunk size."))?;
             pos=end+2;
             if size == 0 { break; }
-            if size > OUTPUT_LIMIT.saturating_sub(decoded.len()) || size > body.len().saturating_sub(pos) { return Err("Risposta snapd incompleta o troppo grande.".into()); }
+            if size > OUTPUT_LIMIT.saturating_sub(decoded.len()) || size > body.len().saturating_sub(pos) { return Err(tr!("Incomplete or oversized snapd response.")); }
             decoded.extend_from_slice(&body[pos..pos+size]); pos+=size;
-            if body.get(pos..pos+2) != Some(b"\r\n") { return Err("Terminazione chunk snapd non valida.".into()); }
+            if body.get(pos..pos+2) != Some(b"\r\n") { return Err(tr!("Invalid snapd chunk terminator.")); }
             pos+=2;
         }
     } else {
-        if fields.contains_key("transfer-encoding") { return Err("Codifica HTTP snapd non supportata.".into()); }
+        if fields.contains_key("transfer-encoding") { return Err(tr!("Unsupported snapd HTTP encoding.")); }
         if let Some(length)=fields.get("content-length") {
-            let length=length.parse::<usize>().map_err(|_|"Lunghezza HTTP snapd non valida.")?;
-            if length != body.len() { return Err("Risposta snapd incompleta.".into()); }
+            let length=length.parse::<usize>().map_err(|_|tr!("Invalid snapd HTTP length."))?;
+            if length != body.len() { return Err(tr!("Incomplete snapd response.")); }
         }
-        if body.len() > OUTPUT_LIMIT { return Err("Risposta snapd oltre il limite di sicurezza.".into()); }
+        if body.len() > OUTPUT_LIMIT { return Err(tr!("snapd response exceeds the safety limit.")); }
         decoded.extend_from_slice(body);
     }
-    let json=serde_json::from_slice(&decoded).map_err(|e|format!("JSON snapd non valido: {e}"))?;
+    let json=serde_json::from_slice(&decoded).map_err(|e|tr!("Invalid snapd JSON: {}", e))?;
     Ok((status,json))
 }
 
 pub(crate) fn snap_get(path: &str) -> Result<serde_json::Value> {
     if !path.starts_with("/v2/") || path.bytes().any(|b|b.is_ascii_control() || b == b' ') {
-        return Err("Percorso API snapd non valido.".into());
+        return Err(tr!("Invalid snapd API path."));
     }
-    let mut socket=UnixStream::connect("/run/snapd.socket").map_err(|e|format!("snapd non raggiungibile: {e}"))?;
+    let mut socket=UnixStream::connect("/run/snapd.socket").map_err(|e|tr!("snapd is unreachable: {}", e))?;
     socket.set_read_timeout(Some(Duration::from_secs(2))).map_err(|e|e.to_string())?;
     socket.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e|e.to_string())?;
-    socket.write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nConnection: close\r\n\r\n").as_bytes()).map_err(|e|format!("Richiesta snapd non riuscita: {e}"))?;
+    socket.write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json\r\nConnection: close\r\n\r\n").as_bytes()).map_err(|e|tr!("snapd request failed: {}", e))?;
     let mut data=Vec::new();
     let mut buf=[0u8;8192];
     let started=Instant::now();
     loop {
-        if started.elapsed() >= QUERY_TIMEOUT { return Err("Tempo massimo della richiesta snapd superato.".into()); }
+        if started.elapsed() >= QUERY_TIMEOUT { return Err(tr!("snapd request timed out.")); }
         match socket.read(&mut buf) {
             Ok(0)=>break,
             Ok(n)=>{
-                if data.len()+n > OUTPUT_LIMIT+16384 { return Err("Risposta snapd oltre il limite di sicurezza.".into()); }
+                if data.len()+n > OUTPUT_LIMIT+16384 { return Err(tr!("snapd response exceeds the safety limit.")); }
                 data.extend_from_slice(&buf[..n]);
             },
             Err(e) if matches!(e.kind(),std::io::ErrorKind::TimedOut|std::io::ErrorKind::WouldBlock)=>continue,
-            Err(e)=>return Err(format!("Lettura snapd non riuscita: {e}")),
+            Err(e)=>return Err(tr!("Reading from snapd failed: {}", e)),
         }
     }
     let (status,value)=decode_http_response(&data)?;
     if status != 200 || value.get("type").and_then(|v|v.as_str()) != Some("sync") {
-        return Err(format!("snapd: {}",value.pointer("/result/message").and_then(|v|v.as_str()).unwrap_or("richiesta non riuscita")));
+        return Err(format!("snapd: {}",value.pointer("/result/message").and_then(|v|v.as_str()).map(str::to_string).unwrap_or_else(|| tr!("request failed"))));
     }
-    value.get("result").cloned().ok_or("snapd non ha restituito un risultato.".into())
+    value.get("result").cloned().ok_or_else(|| tr!("snapd returned no result."))
 }
 
 fn snap_name(id: &str) -> Result<()> {
     if id.len() < 2 || id.len() > 40 || id.starts_with('-') || id.ends_with('-') || id.contains("--")
         || !id.bytes().all(|b|b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         || !id.bytes().any(|b|b.is_ascii_lowercase()) {
-        Err("Nome Snap non valido: sono ammessi nomi canonici dello Store, senza opzioni, percorsi o istanze parallele.".into())
+        Err(tr!("Invalid Snap name: only canonical Store names are allowed, with no options, paths or parallel instances."))
     } else { Ok(()) }
 }
 fn snap_string(value: &serde_json::Value, field: &str) -> String {
@@ -600,13 +614,13 @@ fn stable_snap_channel(channel: &str) -> Result<String> {
         && parts[0].as_bytes()[0].is_ascii_alphanumeric()
         && parts[0].bytes().all(|b|b.is_ascii_alphanumeric() || b".+-".contains(&b)) {
         Ok(channel.into())
-    } else { Err("Sono supportati soltanto canali stable senza ramo temporaneo; il canale attuale non verrà cambiato automaticamente.".into()) }
+    } else { Err(tr!("Only stable channels without a temporary branch are supported; the current channel will not be changed automatically.")) }
 }
 fn snap_publisher(value: &serde_json::Value) -> String {
     let publisher=&value["publisher"];
     let user=snap_string(publisher,"username");
     let display=snap_string(publisher,"display-name");
-    let state=if snap_string(publisher,"validation") == "verified" {"verificato"} else {"non verificato"};
+    let state=if snap_string(publisher,"validation") == "verified" {tr!("verified")} else {tr!("unverified")};
     if display.is_empty() { format!("{user} · {state}") } else { format!("{display} (@{user}) · {state}") }
 }
 fn snap_app_id(value: &serde_json::Value) -> Option<String> {
@@ -637,14 +651,14 @@ pub(crate) fn snap_package(value: &serde_json::Value, installed: bool, update: b
         kind:if critical_snap(&snap_string(value,"name"),&snap_string(value,"type")) {"package".into()} else {"application".into()},icon_url:snap_icon(value),app_id:snap_app_id(value),categories:snap_categories(value)})
 }
 pub(crate) fn snap_local_records() -> Result<Vec<serde_json::Value>> {
-    snap_get("/v2/snaps")?.as_array().cloned().ok_or("Elenco Snap installati non valido.".into())
+    snap_get("/v2/snaps")?.as_array().cloned().ok_or_else(|| tr!("Invalid list of installed Snaps."))
 }
 fn snap_store_record(name: &str) -> Result<serde_json::Value> {
     snap_name(name)?;
-    snap_get(&format!("/v2/find?name={}",uri_component(name)))?.as_array().and_then(|rows|rows.iter().find(|v|v["name"].as_str() == Some(name))).cloned().ok_or("Snap non disponibile nello Store.".into())
+    snap_get(&format!("/v2/find?name={}",uri_component(name)))?.as_array().and_then(|rows|rows.iter().find(|v|v["name"].as_str() == Some(name))).cloned().ok_or_else(|| tr!("Snap not available in the Store."))
 }
 fn snap_update_records() -> Result<Vec<serde_json::Value>> {
-    snap_get("/v2/find?select=refresh")?.as_array().cloned().ok_or("Elenco aggiornamenti Snap non valido.".into())
+    snap_get("/v2/find?select=refresh")?.as_array().cloned().ok_or_else(|| tr!("Invalid list of Snap updates."))
 }
 fn snap_installed() -> Result<Vec<Package>> {
     snap_local_records()?.iter().map(|v|snap_package(v,true,false)).collect()
@@ -661,7 +675,7 @@ fn snap_search(query_text: &str) -> Result<Vec<Package>> {
     let installed=snap_local_records()?;
     let updates:HashSet<String>=snap_update_records()?.iter().map(|v|snap_string(v,"name")).collect();
     let rows=snap_get(&format!("/v2/find?q={}",uri_component(query_text)))?;
-    let rows=rows.as_array().ok_or("Risposta di ricerca Snap non valida.")?;
+    let rows=rows.as_array().ok_or_else(|| tr!("Invalid Snap search response."))?;
     let mut result=Vec::new();
     for value in rows.iter().take(80) {
         let name=snap_string(value,"name");
@@ -684,7 +698,7 @@ fn snap_details(package: Package) -> Result<PackageDetails> {
     if canonical.icon_url.is_none() {canonical.icon_url=snap_icon(&metadata);}
     if canonical.installed { canonical.update_available=snap_update_records()?.iter().any(|v|v["name"] == metadata["name"]); }
     Ok(PackageDetails {package:canonical,description:snap_string(&metadata,"description"),homepage:Some(format!("https://snapcraft.io/{}",package.id)),
-        size:local.and_then(|v|v.get("installed-size")).or_else(||metadata.get("download-size")).and_then(|v|v.as_u64()).map(|n|format!("{:.1} MiB{}",n as f64 /1048576.0,if local.is_some(){" installati"}else{" da scaricare"})),
+        size:local.and_then(|v|v.get("installed-size")).or_else(||metadata.get("download-size")).and_then(|v|v.as_u64()).map(|n|{let mib=format!("{:.1}",n as f64 /1048576.0);if local.is_some(){tr!("{} MiB installed",mib)}else{tr!("{} MiB to download",mib)}}),
         license:metadata.get("license").and_then(|v|v.as_str()).map(str::to_string)})
 }
 
@@ -702,15 +716,15 @@ fn snap_identity(value: &serde_json::Value, channel: &str, store: bool) -> Resul
         confinement:snap_string(value,"confinement"),publisher:format!("{} · Store publisher ID: {}",snap_publisher(value),snap_string(&value["publisher"],"id")),
         kind:snap_string(value,"type"),devmode:value["devmode"].as_bool().unwrap_or(false),status:snap_string(value,"status")};
     if store {
-        let release=value.get("channels").and_then(|c|c.get(&identity.channel)).ok_or("La versione stable selezionata non è disponibile nello Store.")?;
+        let release=value.get("channels").and_then(|c|c.get(&identity.channel)).ok_or_else(|| tr!("The selected stable version is not available in the Store."))?;
         identity.revision=snap_string(release,"revision");
         identity.confinement=snap_string(release,"confinement");
     }
-    if critical_snap(&identity.name,&identity.kind) { return Err("Operazione Snap bloccata: base, kernel, gadget, snapd o componente di sistema richiede gli strumenti dedicati di Ubuntu.".into()); }
-    if identity.confinement != "strict" || identity.devmode { return Err("Operazione Snap bloccata: sono supportate soltanto app con confinamento strict; classic e devmode richiedono un flusso dedicato.".into()); }
+    if critical_snap(&identity.name,&identity.kind) { return Err(tr!("Snap operation blocked: a base, kernel, gadget, snapd or system component needs Ubuntu's dedicated tools.")); }
+    if identity.confinement != "strict" || identity.devmode { return Err(tr!("Snap operation blocked: only apps with strict confinement are supported; classic and devmode need a dedicated flow.")); }
     if identity.store_id.len() != 32 || !identity.store_id.bytes().all(|b|b.is_ascii_alphanumeric())
         || identity.revision.is_empty() || identity.revision.len() > 20 || !identity.revision.bytes().all(|b|b.is_ascii_digit()) || identity.revision == "0" {
-        return Err("Identità Store o revisione Snap non verificabile; nessuna operazione verrà eseguita.".into());
+        return Err(tr!("The Store identity or Snap revision cannot be verified; no operation will run."));
     }
     Ok(identity)
 }
@@ -720,44 +734,44 @@ fn snap_approval(name: &str, action: &str, channel: &str) -> Result<SnapApproval
     snap_name(name)?;
     let local=snap_local_records()?.into_iter().find(|v|v["name"].as_str() == Some(name));
     let installed=local.as_ref().map(|v|snap_identity(v,&snap_string(v,"tracking-channel"),false)).transpose()?;
-    if action == "install" && local.is_some() { return Err("Questo Snap è già installato.".into()); }
-    if action != "install" && local.is_none() { return Err("Questo Snap non è installato.".into()); }
+    if action == "install" && local.is_some() { return Err(tr!("This Snap is already installed.")); }
+    if action != "install" && local.is_none() { return Err(tr!("This Snap is not installed.")); }
     let candidate=if action == "remove" {None} else {Some(snap_identity(&snap_store_record(name)?,channel,true)?)};
     if let (Some(old),Some(new))=(&installed,&candidate) {
-        if old.store_id != new.store_id || old.publisher != new.publisher { return Err("L'identità dello Snap installato differisce dallo Store; operazione bloccata.".into()); }
-        if old.channel != channel { return Err("Il canale Snap è cambiato; prepara un nuovo piano.".into()); }
-        if old.revision == new.revision { return Err("Nessun aggiornamento disponibile per questo Snap.".into()); }
+        if old.store_id != new.store_id || old.publisher != new.publisher { return Err(tr!("The installed Snap's identity differs from the Store's; operation blocked.")); }
+        if old.channel != channel { return Err(tr!("The Snap channel has changed; prepare a new plan.")); }
+        if old.revision == new.revision { return Err(tr!("No update available for this Snap.")); }
     }
     Ok(SnapApproval {name:name.into(),channel:channel.into(),installed,candidate})
 }
 fn snap_plan(package: Option<Package>, action: &str) -> Result<(Invocation,Proof,Vec<String>,bool)> {
-    if !available("/usr/bin/snap") { return Err("Snap non è installato.".into()); }
+    if !available("/usr/bin/snap") { return Err(tr!("Snap is not installed.")); }
     snap_get("/v2/system-info")?;
     if action == "refresh" {
         return Ok((Invocation::new("/usr/bin/snap",&["refresh","--list"]),Proof::None,
-            vec!["Controlla soltanto gli aggiornamenti disponibili nello Snap Store. Il comando snap refresh --list non aggiorna e non installa alcun pacchetto.".into()],false));
+            vec![tr!("Only checks for updates available in the Snap Store. The snap refresh --list command does not update or install any package.")],false));
     }
-    if !available("/usr/bin/pkexec") { return Err("pkexec non disponibile: necessario per modificare gli Snap.".into()); }
-    let package=package.ok_or("Seleziona un'app Snap.")?;
-    if package.source != Source::Snap { return Err("Sorgente del pacchetto non coerente.".into()); }
+    if !available("/usr/bin/pkexec") { return Err(tr!("pkexec is not available: it is needed to change Snaps.")); }
+    let package=package.ok_or_else(|| tr!("Select a Snap app."))?;
+    if package.source != Source::Snap { return Err(tr!("The package source does not match.")); }
     snap_name(&package.id)?;
     // Read the actual tracking channel from snapd. Never trust IPC package flags
     // or silently move an existing app onto another track.
     let channel=if action == "install" {"latest/stable".into()} else {
-        let local=snap_local_records()?.into_iter().find(|v|v["name"].as_str() == Some(&package.id)).ok_or("Snap non installato.")?;
+        let local=snap_local_records()?.into_iter().find(|v|v["name"].as_str() == Some(&package.id)).ok_or_else(|| tr!("Snap not installed."))?;
         stable_snap_channel(&snap_string(&local,"tracking-channel"))?
     };
     let approved=snap_approval(&package.id,action,&channel)?;
-    let identity=approved.candidate.as_ref().or(approved.installed.as_ref()).ok_or("Identità Snap non disponibile.")?;
-    let verb=match action {"install"=>"install","remove"=>"remove","update"=>"refresh",_=>return Err("Azione Snap non valida.".into())};
+    let identity=approved.candidate.as_ref().or(approved.installed.as_ref()).ok_or_else(|| tr!("Snap identity not available."))?;
+    let verb=match action {"install"=>"install","remove"=>"remove","update"=>"refresh",_=>return Err(tr!("Invalid Snap action."))};
     let mut args=vec!["/usr/bin/snap".into(),verb.into()];
     if action != "remove" {args.push(format!("--channel={channel}"));args.push(format!("--revision={}",identity.revision));}
     args.push("--".into()); args.push(package.id.clone());
-    let details=vec![format!("App: {}. Snap Store ID: {}. Revisione approvata: {}. Canale: {}. Confinamento: {}.",package.id,identity.store_id,identity.revision,channel,identity.confinement),
-        format!("Publisher dichiarato dallo Snap Store: {}. Nessuna opzione --classic, --devmode, --dangerous o --purge verrà utilizzata.",identity.publisher),
-        if action == "remove" {"La rimozione elimina le revisioni e i dati dell'app. Snapd normalmente crea uno snapshot automatico, salvo disattivazione nelle impostazioni di sistema. Esegui un backup dei dati che desideri conservare prima di confermare.".into()}
-            else {"Snapd può installare basi, runtime e componenti necessari all'app e gestisce connessioni e aggiornamenti automatici secondo la configurazione di Ubuntu. L'operazione seleziona soltanto questa app e conserva il canale stable approvato.".into()},
-        "La conferma scade dopo 2 minuti ed è monouso. Identità, publisher, revisione installata e canale vengono ricontrollati prima dell'autenticazione amministratore.".into()];
+    let details=vec![tr!("App: {}. Snap Store ID: {}. Approved revision: {}. Channel: {}. Confinement: {}.",package.id,identity.store_id,identity.revision,channel,identity.confinement),
+        tr!("Publisher declared by the Snap Store: {}. No --classic, --devmode, --dangerous or --purge option will be used.",identity.publisher),
+        if action == "remove" {tr!("Removal deletes the app's revisions and data. Snapd normally takes an automatic snapshot unless it is disabled in the system settings. Back up any data you want to keep before confirming.")}
+            else {tr!("Snapd may install the bases, runtimes and components the app needs and handles connections and automatic updates according to Ubuntu's configuration. The operation selects only this app and keeps the approved stable channel.")},
+        tr!("The confirmation expires after 2 minutes and can be used once. Identity, publisher, installed revision and channel are checked again before administrator authentication.")];
     Ok((Invocation {program:"/usr/bin/pkexec".into(),args},Proof::Snap {action:action.into(),approved},details,true))
 }
 
@@ -766,32 +780,33 @@ fn snap_plan(package: Option<Package>, action: &str) -> Result<(Invocation,Proof
 pub fn open_app(package: Package) -> Result<()> {
     ensure_ubuntu()?;
     let (program, args): (&str, Vec<String>) = match package.source {
+        Source::Appimage => return crate::appimage::open(&package),
         Source::Flatpak => {
             flatpak_id(&package.id)?;
             let id = app_id(&package.id).to_string();
-            if !available("/usr/bin/flatpak") { return Err("Flatpak non è installato.".into()); }
-            if !flatpak_installed()?.iter().any(|p| app_id(&p.id) == id) { return Err("Questa app Flatpak non risulta installata.".into()); }
+            if !available("/usr/bin/flatpak") { return Err(tr!("Flatpak is not installed.")); }
+            if !flatpak_installed()?.iter().any(|p| app_id(&p.id) == id) { return Err(tr!("This Flatpak app does not appear to be installed.")); }
             ("/usr/bin/flatpak", vec!["run".into(), id])
         },
         Source::Snap => {
             snap_name(&package.id)?;
-            if !available("/usr/bin/snap") { return Err("Snap non è installato.".into()); }
-            if !snap_local_records()?.iter().any(|v| v["name"].as_str() == Some(&package.id)) { return Err("Questo Snap non risulta installato.".into()); }
-            let launcher = crate::catalog::snap_desktop_file(&package.id).ok_or("Questa app non ha un'interfaccia grafica da avviare: si usa dal terminale.")?;
-            if !available("/usr/bin/gio") { return Err("Lo strumento gio non è disponibile.".into()); }
+            if !available("/usr/bin/snap") { return Err(tr!("Snap is not installed.")); }
+            if !snap_local_records()?.iter().any(|v| v["name"].as_str() == Some(&package.id)) { return Err(tr!("This Snap does not appear to be installed.")); }
+            let launcher = crate::catalog::snap_desktop_file(&package.id).ok_or_else(|| tr!("This app has no graphical interface to launch: it is used from the terminal."))?;
+            if !available("/usr/bin/gio") { return Err(tr!("The gio tool is not available.")); }
             ("/usr/bin/gio", vec!["launch".into(), launcher.to_string_lossy().into_owned()])
         },
         Source::Apt => {
             apt_id(&package.id)?;
-            if !apt_installed()?.iter().any(|p| base_id(&p.id) == base_id(&package.id)) { return Err("Questo pacchetto non risulta installato.".into()); }
-            let launcher = crate::catalog::apt_desktop_file(base_id(&package.id)).ok_or("Questo pacchetto non ha un'app da avviare.")?;
-            if !available("/usr/bin/gio") { return Err("Lo strumento gio non è disponibile.".into()); }
+            if !apt_installed()?.iter().any(|p| base_id(&p.id) == base_id(&package.id)) { return Err(tr!("This package does not appear to be installed.")); }
+            let launcher = crate::catalog::apt_desktop_file(base_id(&package.id)).ok_or_else(|| tr!("This package has no app to launch."))?;
+            if !available("/usr/bin/gio") { return Err(tr!("The gio tool is not available.")); }
             ("/usr/bin/gio", vec!["launch".into(), launcher.to_string_lossy().into_owned()])
         },
     };
     use std::os::unix::process::CommandExt;
     let mut child = Command::new(program).args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0)
-        .spawn().map_err(|e| format!("Impossibile avviare l'app: {e}"))?;
+        .spawn().map_err(|e| tr!("Cannot start the app: {}", e))?;
     // Reap it when it ends so no zombie is left behind; the app itself keeps running on its own.
     thread::spawn(move || { let _ = child.wait(); });
     Ok(())
@@ -800,56 +815,65 @@ pub fn open_app(package: Package) -> Result<()> {
 pub fn search_packages(query_text: String, source: String) -> Result<Vec<Package>> {
     ensure_ubuntu()?;
     let q = validate_query(&query_text)?;
-    let (apt, flatpak, snap) = selected(&source)?;
+    let sel = selected(&source)?;
     let mut result = Vec::new();
-    if apt { result.extend(apt_search(q)?); }
-    if flatpak && available("/usr/bin/flatpak") {
+    if sel.apt { result.extend(apt_search(q)?); }
+    if sel.flatpak && available("/usr/bin/flatpak") {
         match flatpak_search(q) {Ok(packages)=>result.extend(packages),Err(_) if source == "all"=>{},Err(e)=>return Err(e)}
     }
-    if source == "flatpak" && !available("/usr/bin/flatpak") { return Err("Flatpak non è installato.".into()); }
-    if snap && available("/usr/bin/snap") {
+    if source == "flatpak" && !available("/usr/bin/flatpak") { return Err(tr!("Flatpak is not installed.")); }
+    if sel.snap && available("/usr/bin/snap") {
         match snap_search(q) {Ok(packages)=>result.extend(packages),Err(_) if source == "all"=>{},Err(e)=>return Err(e)}
     }
-    if source == "snap" && !available("/usr/bin/snap") { return Err("Snap non è installato.".into()); }
+    if source == "snap" && !available("/usr/bin/snap") { return Err(tr!("Snap is not installed.")); }
+    if sel.appimage {
+        match crate::appimage::search(q) {Ok(packages)=>result.extend(packages),Err(_) if source == "all"=>{},Err(e)=>return Err(e)}
+    }
     enrich_packages(&mut result);
     Ok(result)
 }
 pub fn list_installed(source: String) -> Result<Vec<Package>> {
     ensure_ubuntu()?;
-    let (apt,flatpak,snap) = selected(&source)?;
+    let sel = selected(&source)?;
     let mut result = Vec::new();
-    if apt { result.extend(apt_installed()?); }
-    if flatpak && available("/usr/bin/flatpak") {
+    if sel.apt { result.extend(apt_installed()?); }
+    if sel.flatpak && available("/usr/bin/flatpak") {
         match flatpak_installed() {Ok(packages)=>result.extend(packages),Err(_) if source == "all"=>{},Err(e)=>return Err(e)}
     }
-    if source == "flatpak" && !available("/usr/bin/flatpak") { return Err("Flatpak non è installato.".into()); }
-    if snap && available("/usr/bin/snap") {
+    if source == "flatpak" && !available("/usr/bin/flatpak") { return Err(tr!("Flatpak is not installed.")); }
+    if sel.snap && available("/usr/bin/snap") {
         match snap_installed() {Ok(packages)=>result.extend(packages),Err(_) if source == "all"=>{},Err(e)=>return Err(e)}
     }
-    if source == "snap" && !available("/usr/bin/snap") { return Err("Snap non è installato.".into()); }
+    if source == "snap" && !available("/usr/bin/snap") { return Err(tr!("Snap is not installed.")); }
+    if sel.appimage {
+        match crate::appimage::installed() {Ok(packages)=>result.extend(packages),Err(_) if source == "all"=>{},Err(e)=>return Err(e)}
+    }
     result.sort_by_key(|p| p.name.to_lowercase());
     enrich_packages(&mut result);
     Ok(result)
 }
 pub fn list_updates(source: String) -> Result<Vec<Package>> {
     ensure_ubuntu()?;
-    let (apt,flatpak,snap) = selected(&source)?;
+    let sel = selected(&source)?;
     let mut result = Vec::new();
-    if apt {
+    if sel.apt {
         let installed: HashMap<_,_> = apt_installed()?.into_iter().map(|p| (p.id.clone(),p)).collect();
         for mut p in apt_updates()? {
             if let Some(old) = installed.get(&p.id) { p.summary = old.summary.clone(); }
             result.push(p);
         }
     }
-    if flatpak && available("/usr/bin/flatpak") {
+    if sel.flatpak && available("/usr/bin/flatpak") {
         match flatpak_updates() {Ok(packages)=>result.extend(packages),Err(_) if source == "all"=>{},Err(e)=>return Err(e)}
     }
-    if source == "flatpak" && !available("/usr/bin/flatpak") { return Err("Flatpak non è installato.".into()); }
-    if snap && available("/usr/bin/snap") {
+    if source == "flatpak" && !available("/usr/bin/flatpak") { return Err(tr!("Flatpak is not installed.")); }
+    if sel.snap && available("/usr/bin/snap") {
         match snap_updates() {Ok(packages)=>result.extend(packages),Err(_) if source == "all"=>{},Err(e)=>return Err(e)}
     }
-    if source == "snap" && !available("/usr/bin/snap") { return Err("Snap non è installato.".into()); }
+    if source == "snap" && !available("/usr/bin/snap") { return Err(tr!("Snap is not installed.")); }
+    if sel.appimage {
+        match crate::appimage::updates() {Ok(packages)=>result.extend(packages),Err(_) if source == "all"=>{},Err(e)=>return Err(e)}
+    }
     enrich_packages(&mut result);
     Ok(result)
 }
@@ -886,6 +910,8 @@ pub(crate) fn enrich_packages(packages: &mut [Package]) {
             // Snap's canonical type and protected-component classification were
             // already obtained from snapd, not inferred from a display label.
             Source::Snap=>("snap",package.id.as_str()),
+            // AppImage entries carry their own icon and categories (see `appimage.rs`).
+            Source::Appimage=>continue,
         };
         if package.icon_url.is_none() {
             package.icon_url=crate::catalog::local_icon(source,id,package.scope.as_deref(),package.remote.as_deref());
@@ -897,16 +923,16 @@ fn candidate_version(id: &str) -> Result<String> {
     apt_id(id)?;
     let output = query("/usr/bin/apt-cache", &["policy", "--", id])?;
     let version = output.lines().find_map(|l| l.trim().strip_prefix("Candidate: "))
-        .filter(|s| *s != "(none)").ok_or("Il pacchetto non ha una versione candidata APT.")?;
+        .filter(|s| *s != "(none)").ok_or_else(|| tr!("The package has no APT candidate version."))?;
     if version.is_empty() || version.len() > 255 || !version.bytes().all(|b| b.is_ascii_alphanumeric() || b".:+~-".contains(&b)) {
-        return Err("Versione candidata APT non valida.".into());
+        return Err(tr!("Invalid APT candidate version."));
     }
     Ok(version.into())
 }
 fn apt_details(package: Package) -> Result<PackageDetails> {
     apt_id(&package.id)?;
     let text = query("/usr/bin/apt-cache", &["show", "--no-all-versions", "--", &package.id])?;
-    let record = parse_control(&text).into_iter().next().ok_or("Metadati del pacchetto APT non disponibili.")?;
+    let record = parse_control(&text).into_iter().next().ok_or_else(|| tr!("APT package metadata not available."))?;
     let description = record.get("Description-en").or_else(|| record.get("Description")).cloned().unwrap_or_default();
     // The first line is the one-line synopsis, already shown as the summary: keep only the long text.
     let long_description = description.split_once('\n').map(|(_, rest)| rest.trim().to_string()).filter(|rest| !rest.is_empty());
@@ -916,14 +942,14 @@ fn apt_details(package: Package) -> Result<PackageDetails> {
         version: record.get("Version").cloned().unwrap_or_default(), source: Source::Apt, installed: installed.is_some(),
         update_available, remote: None, scope: None, publisher: None, channel: None, confinement: None, kind:default_package_kind(),icon_url:None,app_id:None,categories:Vec::new() };
     Ok(PackageDetails { package: p, description: long_description.unwrap_or(description), homepage: record.get("Homepage").cloned(),
-        size: record.get("Installed-Size").map(|s| format!("{s} KiB installati")), license: None })
+        size: record.get("Installed-Size").map(|s| tr!("{} KiB installed", s)), license: None })
 }
 fn flatpak_info_command(package: &Package, metadata: Option<&str>) -> Result<Invocation> {
     flatpak_id(&package.id)?;
     let scope = scope_arg(package.scope.as_deref())?;
     let installed = flatpak_installed()?.into_iter().any(|p| p.scope == package.scope && (p.id == package.id || app_id(&p.id) == package.id));
     let mut args: Vec<String> = if installed { vec!["info".into(), scope.into()] } else {
-        let remote = package.remote.as_deref().ok_or("Repository Flatpak non specificato.")?;
+        let remote = package.remote.as_deref().ok_or_else(|| tr!("Flatpak remote not specified."))?;
         remote_id(remote)?;
         vec!["remote-info".into(),scope.into(),remote.into()]
     };
@@ -933,7 +959,7 @@ fn flatpak_info_command(package: &Package, metadata: Option<&str>) -> Result<Inv
 }
 fn run_checked(inv: &Invocation) -> Result<String> {
     let output = run(inv, QUERY_TIMEOUT, false)?;
-    if output.text.contains("[output troncato a 2 MiB]") { return Err("Risposta incompleta: il comando supera il limite di sicurezza. Operazione annullata.".into()); }
+    if output.text.contains(truncation_note().trim()) { return Err(tr!("Incomplete answer: the command exceeds the safety limit. Operation cancelled.")); }
     if output.success { Ok(output.text) } else { Err(output.text.trim().into()) }
 }
 fn flatpak_details(package: Package) -> Result<PackageDetails> {
@@ -956,7 +982,7 @@ fn flatpak_details(package: Package) -> Result<PackageDetails> {
 }
 pub fn package_details(package: Package) -> Result<PackageDetails> {
     ensure_ubuntu()?;
-    let mut details=match package.source { Source::Apt => apt_details(package), Source::Flatpak => flatpak_details(package), Source::Snap => snap_details(package) }?;
+    let mut details=match package.source { Source::Apt => apt_details(package), Source::Flatpak => flatpak_details(package), Source::Snap => snap_details(package), Source::Appimage => crate::appimage::details(package) }?;
     enrich_packages(std::slice::from_mut(&mut details.package));
     Ok(details)
 }
@@ -968,7 +994,7 @@ fn apt_effects(text: &str) -> Result<AptEffects> {
     for line in text.lines() {
         let words: Vec<_> = line.split_whitespace().collect();
         if let Some(kind @ ("Inst" | "Remv" | "Conf")) = words.first().copied() {
-            let id = words.get(1).ok_or("Simulazione APT non riconosciuta.")?;
+            let id = words.get(1).ok_or_else(|| tr!("Unrecognized APT simulation."))?;
             apt_id(id)?;
             if kind == "Remv" { effects.removals.push((*id).into()); }
             if kind == "Inst" { effects.installs.push((*id).into()); }
@@ -986,22 +1012,22 @@ fn critical_package(id: &str) -> bool {
 }
 fn check_removals(effects: &AptEffects, target: &str, action: &str) -> Result<()> {
     if action != "remove" && !effects.removals.is_empty() {
-        return Err("Operazione bloccata: l'installazione o l'aggiornamento rimuoverebbe altri pacchetti.".into());
+        return Err(tr!("Operation blocked: the installation or update would remove other packages."));
     }
     if action == "remove" {
-        if effects.removals.len() > 20 { return Err("Rimozione bloccata: oltre 20 pacchetti coinvolti. Usa gli strumenti di sistema per una revisione approfondita.".into()); }
-        if !effects.installs.is_empty() { return Err("Rimozione bloccata: APT installerebbe altri pacchetti.".into()); }
+        if effects.removals.len() > 20 { return Err(tr!("Removal blocked: more than 20 packages involved. Use the system tools for a careful review.")); }
+        if !effects.installs.is_empty() { return Err(tr!("Removal blocked: APT would install other packages.")); }
         if !effects.removals.iter().any(|id| base_id(id) == base_id(target)) {
-            return Err("Il pacchetto richiesto non risulta rimuovibile o installato.".into());
+            return Err(tr!("The requested package cannot be removed or is not installed."));
         }
     }
     for id in &effects.removals {
-        if critical_package(id) { return Err(format!("Rimozione bloccata: {id} è un componente critico del sistema.")); }
+        if critical_package(id) { return Err(tr!("Removal blocked: {} is a critical system component.", id)); }
         let flags = query("/usr/bin/dpkg-query", &["-W", "-f=${Essential}\t${Protected}\t${Priority}\n", "--", id])?;
         for line in flags.lines() {
             let c: Vec<_> = line.split('\t').collect();
             if c.first() == Some(&"yes") || c.get(1) == Some(&"yes") || c.get(2).map(|x| matches!(*x,"required"|"important")).unwrap_or(false) {
-                return Err(format!("Rimozione bloccata: {id} è Essential, Protected o di priorità elevata."));
+                return Err(tr!("Removal blocked: {} is Essential, Protected or high priority.", id));
             }
         }
     }
@@ -1009,7 +1035,9 @@ fn check_removals(effects: &AptEffects, target: &str, action: &str) -> Result<()
 }
 
 enum Proof { Apt { simulation: Invocation, effects: AptEffects, target: String, action: String },
-    Flatpak { checks: Vec<(Invocation,String)>, remotes: Vec<Remote> }, Snap {action:String,approved:SnapApproval}, None }
+    Flatpak { checks: Vec<(Invocation,String)>, remotes: Vec<Remote> }, Snap {action:String,approved:SnapApproval},
+    /// AppImage operations run inside the app (a verified download), not as an external command.
+    Appimage(Box<crate::appimage::Prepared>), None }
 /// What a confirmed plan does, in the words the notifications use.
 #[derive(Debug, Clone)]
 pub struct OperationInfo { pub action: String, pub label: String, pub source: String }
@@ -1026,7 +1054,7 @@ pub fn operation_running() -> bool { MUTATING.load(Ordering::Acquire) }
 pub fn running_operation() -> Option<OperationInfo> { CURRENT.lock().ok().and_then(|current| current.clone()) }
 
 fn apt_plan(package: Option<Package>, action: &str) -> Result<(Invocation, Proof, Vec<String>, bool)> {
-    if !available("/usr/bin/pkexec") { return Err("pkexec non disponibile: installa pkexec con gli strumenti di Ubuntu.".into()); }
+    if !available("/usr/bin/pkexec") { return Err(tr!("pkexec is not available: install pkexec with Ubuntu's tools.")); }
     let mut common = vec!["-y".to_string(), "-o".into(), "DPkg::Lock::Timeout=30".into(),
         "-o".into(), "Acquire::Retries=1".into(), "-o".into(), "Acquire::http::Timeout=30".into(),
         "-o".into(), "Acquire::https::Timeout=30".into(), "-o".into(), "APT::Get::AutomaticRemove=false".into(),
@@ -1035,18 +1063,18 @@ fn apt_plan(package: Option<Package>, action: &str) -> Result<(Invocation, Proof
         common.push("update".into());
         let mut args = vec!["/usr/bin/apt-get".into()]; args.extend(common);
         return Ok((Invocation { program: "/usr/bin/pkexec".into(), args }, Proof::None,
-            vec!["Aggiorna soltanto gli indici APT dei repository già configurati. Nessun pacchetto verrà aggiornato.".into(),
-                "L'autenticazione amministratore verrà richiesta da PolicyKit.".into()],true));
+            vec![tr!("Only refreshes the APT indexes of the repositories already configured. No package will be updated."),
+                tr!("PolicyKit will ask for administrator authentication.")],true));
     }
-    let package = package.ok_or("Seleziona un pacchetto per questa operazione.")?;
-    if package.source != Source::Apt { return Err("Sorgente del pacchetto non coerente.".into()); }
+    let package = package.ok_or_else(|| tr!("Select a package for this operation."))?;
+    if package.source != Source::Apt { return Err(tr!("The package source does not match.")); }
     apt_id(&package.id)?;
     let installed = apt_installed()?.iter().any(|p| p.id == package.id || base_id(&p.id) == base_id(&package.id));
-    if action == "remove" && critical_package(&package.id) { return Err("Rimozione bloccata: componente critico di Ubuntu.".into()); }
-    if (action == "remove" || action == "update") && !installed { return Err("Il pacchetto non è installato.".into()); }
-    if action == "install" && installed { return Err("Il pacchetto è già installato; usa Aggiorna se disponibile.".into()); }
+    if action == "remove" && critical_package(&package.id) { return Err(tr!("Removal blocked: critical Ubuntu component.")); }
+    if (action == "remove" || action == "update") && !installed { return Err(tr!("The package is not installed.")); }
+    if action == "install" && installed { return Err(tr!("The package is already installed; use Update if available.")); }
     if action == "update" && !apt_updates()?.iter().any(|p| base_id(&p.id) == base_id(&package.id)) {
-        return Err("Nessun aggiornamento disponibile per questo pacchetto.".into());
+        return Err(tr!("No update available for this package."));
     }
     let mut operation = Vec::<String>::new();
     if action != "remove" { operation.push("--no-remove".into()); }
@@ -1059,43 +1087,43 @@ fn apt_plan(package: Option<Package>, action: &str) -> Result<(Invocation, Proof
     let output = run_checked(&simulation)?;
     let effects = apt_effects(&output)?;
     check_removals(&effects,&package.id,action)?;
-    if action != "remove" && effects.installs.is_empty() { return Err("Non risultano modifiche da applicare a questo pacchetto.".into()); }
+    if action != "remove" && effects.installs.is_empty() { return Err(tr!("There are no changes to apply to this package.")); }
     common.extend(operation);
     let mut args = vec!["/usr/bin/apt-get".into()]; args.extend(common);
-    let details = vec![format!("Revisione APT: {} installazioni/aggiornamenti e {} rimozioni. Le dipendenze elencate sono incluse nel consenso.", effects.installs.len(),effects.removals.len()),
-        output, "Il piano scade dopo 2 minuti ed è utilizzabile una sola volta. APT verrà simulato di nuovo prima dell'esecuzione.".into(),
-        "Le configurazioni locali vengono conservate; nessun autoremove, purge o aggiornamento globale.".into()];
+    let details = vec![tr!("APT review: {} installations/upgrades and {} removals. The listed dependencies are part of your consent.", effects.installs.len(),effects.removals.len()),
+        output, tr!("The plan expires after 2 minutes and can be used once. APT will be simulated again before running."),
+        tr!("Local configuration is kept; no autoremove, purge or global upgrade.")];
     Ok((Invocation { program: "/usr/bin/pkexec".into(), args },
         Proof::Apt { simulation, effects, target: package.id, action: action.into() },details,true))
 }
 
 fn flatpak_remote(package: &Package, install: bool) -> Result<Remote> {
-    let name = package.remote.as_deref().ok_or("Repository Flatpak non specificato.")?;
+    let name = package.remote.as_deref().ok_or_else(|| tr!("Flatpak remote not specified."))?;
     remote_id(name)?;
     let scope = if install { "user" } else { package.scope.as_deref().unwrap_or("user") };
     scope_arg(Some(scope))?;
     let remote = remotes()?.into_iter().find(|r| r.name == name && r.scope == scope)
-        .ok_or_else(|| format!("Il repository {name} non è configurato nell'ambito {scope}. Nexa Store non aggiunge repository automaticamente."))?;
-    if !remote.verified { return Err("Operazione bloccata: il repository Flatpak non verifica le firme GPG.".into()); }
+        .ok_or_else(|| tr!("The remote {} is not configured in the {} scope. Nexa Store does not add remotes automatically.", name, scope))?;
+    if !remote.verified { return Err(tr!("Operation blocked: the Flatpak remote does not verify GPG signatures.")); }
     Ok(remote)
 }
 fn flatpak_plan(package: Option<Package>, action: &str) -> Result<(Invocation, Proof, Vec<String>, bool)> {
-    if !available("/usr/bin/flatpak") { return Err("Flatpak non è installato.".into()); }
+    if !available("/usr/bin/flatpak") { return Err(tr!("Flatpak is not installed.")); }
     if action == "refresh" {
         let rows = remotes()?;
-        if !rows.iter().any(|r| r.scope == "user") { return Err("Nessun repository Flatpak utente configurato.".into()); }
-        if rows.iter().any(|r| r.scope == "user" && !r.verified) { return Err("Un repository utente non verifica le firme GPG; aggiornamento metadati bloccato.".into()); }
+        if !rows.iter().any(|r| r.scope == "user") { return Err(tr!("No user Flatpak remote is configured.")); }
+        if rows.iter().any(|r| r.scope == "user" && !r.verified) { return Err(tr!("A user remote does not verify GPG signatures; metadata update blocked.")); }
         return Ok((Invocation::new("/usr/bin/flatpak", &["update", "--user", "--appstream", "--noninteractive", "--assumeyes"]),
-            Proof::Flatpak {checks:vec![],remotes:rows},vec!["Aggiorna soltanto i metadati AppStream dei repository Flatpak utente configurati; le app restano invariate.".into()],false));
+            Proof::Flatpak {checks:vec![],remotes:rows},vec![tr!("Only refreshes the AppStream metadata of the configured user Flatpak remotes; apps stay unchanged.")],false));
     }
-    let mut package = package.ok_or("Seleziona un'app Flatpak.")?;
-    if package.source != Source::Flatpak { return Err("Sorgente del pacchetto non coerente.".into()); }
+    let mut package = package.ok_or_else(|| tr!("Select a Flatpak app."))?;
+    if package.source != Source::Flatpak { return Err(tr!("The package source does not match.")); }
     flatpak_id(&package.id)?;
     let requested_scope = scope_arg(package.scope.as_deref())?;
     let installed = flatpak_installed()?.into_iter().find(|p| (p.id == package.id || app_id(&p.id) == package.id)
         && scope_arg(p.scope.as_deref()).ok() == Some(requested_scope));
-    if action == "install" && installed.is_some() { return Err("L'app è già installata in questo ambito.".into()); }
-    if action != "install" { package = installed.ok_or("App Flatpak non installata nell'ambito selezionato.")?; }
+    if action == "install" && installed.is_some() { return Err(tr!("The app is already installed in this scope.")); }
+    if action != "install" { package = installed.ok_or_else(|| tr!("Flatpak app not installed in the selected scope."))?; }
     let mut checks = Vec::new();
     let mut details = Vec::new();
     let trusted_remotes = remotes()?;
@@ -1108,16 +1136,16 @@ fn flatpak_plan(package: Option<Package>, action: &str) -> Result<(Invocation, P
         let resolve = Invocation::new("/usr/bin/flatpak", &["remote-info", remote_scope, "--show-ref", &remote.name, &package.id]);
         reference = run_checked(&resolve)?.trim().to_string();
         flatpak_id(&reference)?;
-        if !reference.starts_with("app/") { return Err("È consentita soltanto la gestione di app Flatpak, non dei runtime direttamente.".into()); }
+        if !reference.starts_with("app/") { return Err(tr!("Only Flatpak apps can be managed, not runtimes directly.")); }
         checks.push((resolve,reference.clone()));
         let commit = Invocation::new("/usr/bin/flatpak", &["remote-info", remote_scope, "--show-commit", &remote.name, &reference]);
         let value = run_checked(&commit)?.trim().to_string();
-        if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) { return Err("Commit Flatpak non valido.".into()); }
+        if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) { return Err(tr!("Invalid Flatpak commit.")); }
         checks.push((commit,value.clone()));
         approved_commit = Some(value.clone());
-        details.push(format!("Repository esistente con verifica GPG: {} ({}, {}). Riferimento: {}. Commit: {}.",remote.name,remote.scope,remote.url,reference,value));
+        details.push(tr!("Existing remote with GPG verification: {} ({}, {}). Reference: {}. Commit: {}.",remote.name,remote.scope,remote.url,reference,value));
         let metadata = query("/usr/bin/flatpak", &["remote-info", remote_scope, "--show-metadata", &remote.name, &reference])?;
-        details.push(format!("Metadati e permessi dichiarati dall'app:\n{}", metadata.chars().take(16000).collect::<String>()));
+        details.push(tr!("Metadata and permissions declared by the app:\n{}", metadata.chars().take(16000).collect::<String>()));
         package.remote = Some(remote.name);
     } else { reference = package.id.clone(); }
     if action != "install" {
@@ -1125,23 +1153,32 @@ fn flatpak_plan(package: Option<Package>, action: &str) -> Result<(Invocation, P
         let value = run_checked(&installed_commit)?.trim().to_string();
         checks.push((installed_commit,value));
     }
-    let mut args = vec![match action { "install" => "install", "remove" => "uninstall", "update" => "update", _ => return Err("Azione non valida.".into()) }.into(),
+    let mut args = vec![match action { "install" => "install", "remove" => "uninstall", "update" => "update", _ => return Err(tr!("Invalid action.")) }.into(),
         scope.into(), "--noninteractive".into(), "--assumeyes".into()];
     if action == "update" {
-        args.push(format!("--commit={}",approved_commit.ok_or("Commit approvato mancante.")?));
+        args.push(format!("--commit={}",approved_commit.ok_or_else(|| tr!("Approved commit missing."))?));
     }
-    if action == "install" { args.push(package.remote.ok_or("Repository mancante.")?); }
+    if action == "install" { args.push(package.remote.ok_or_else(|| tr!("Remote missing."))?); }
     args.push(reference);
-    details.push(if action == "remove" {"Verrà rimossa soltanto l'app selezionata. I dati personali vengono conservati; nessuna rimozione dei runtime inutilizzati.".into()}
-        else {"Flatpak può includere runtime e dipendenze richiesti dall'app. Il relativo spazio e download vengono risolti da Flatpak all'esecuzione; nessun nuovo repository verrà aggiunto.".into()});
-    details.push("Conferma valida per 2 minuti e per una sola esecuzione. I riferimenti e i commit vengono ricontrollati prima di procedere.".into());
+    details.push(if action == "remove" {tr!("Only the selected app will be removed. Personal data is kept; unused runtimes are not removed.")}
+        else {tr!("Flatpak may include the runtimes and dependencies the app needs. Their size and download are resolved by Flatpak when it runs; no new remote will be added.")});
+    details.push(tr!("The confirmation is valid for 2 minutes and a single run. References and commits are checked again before proceeding."));
     Ok((Invocation { program:"/usr/bin/flatpak".into(),args }, Proof::Flatpak {checks,remotes:trusted_remotes},details,scope == "--system"))
+}
+
+fn appimage_plan(package: Option<Package>, action: &str) -> Result<(Invocation, Proof, Vec<String>, bool)> {
+    let package = package.ok_or_else(|| tr!("Select an AppImage app."))?;
+    if package.source != Source::Appimage { return Err(tr!("The package source does not match.")); }
+    if action == "refresh" { return Err(tr!("AppImages have no index to refresh; updates are checked per app.")); }
+    let (prepared, details) = crate::appimage::plan(&package, action)?;
+    // The invocation is only a placeholder: AppImage operations never start an external command.
+    Ok((Invocation::new("nexa-store", &["appimage", action]), Proof::Appimage(Box::new(prepared)), details, false))
 }
 
 pub fn prepare_operation(package: Option<Package>, action: String, source: Option<String>) -> Result<Plan> {
     ensure_ubuntu()?;
-    if MUTATING.load(Ordering::Acquire) { return Err("Un'altra operazione è in corso. Attendi il completamento.".into()); }
-    if !matches!(action.as_str(),"install"|"remove"|"update"|"refresh") { return Err("Azione non valida.".into()); }
+    if MUTATING.load(Ordering::Acquire) { return Err(tr!("Another operation is in progress. Wait for it to finish.")); }
+    if !matches!(action.as_str(),"install"|"remove"|"update"|"refresh") { return Err(tr!("Invalid action.")); }
     let selected_source = match (&package,source.as_deref()) {
         (Some(p),None) => p.source,
         (Some(p),Some("apt")) if p.source == Source::Apt => Source::Apt,
@@ -1150,67 +1187,74 @@ pub fn prepare_operation(package: Option<Package>, action: String, source: Optio
         (None,Some("flatpak")) => Source::Flatpak,
         (Some(p),Some("snap")) if p.source == Source::Snap => Source::Snap,
         (None,Some("snap")) => Source::Snap,
-        _ => return Err("Seleziona una singola sorgente valida per l'operazione.".into()),
+        (Some(p),Some("appimage")) if p.source == Source::Appimage => Source::Appimage,
+        (None,Some("appimage")) => Source::Appimage,
+        _ => return Err(tr!("Select a single valid source for the operation.")),
     };
-    if action == "refresh" && package.is_some() { return Err("L'aggiornamento indici non richiede un pacchetto.".into()); }
-    let label = package.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| match selected_source {Source::Apt=>"APT",Source::Flatpak=>"Flatpak",Source::Snap=>"Snap"}.into());
+    if action == "refresh" && package.is_some() { return Err(tr!("Refreshing indexes does not need a package.")); }
+    let label = package.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| match selected_source {Source::Apt=>"APT",Source::Flatpak=>"Flatpak",Source::Snap=>"Snap",Source::Appimage=>"AppImage"}.into());
     let (invocation,proof,details,requires_admin) = match selected_source {
         Source::Apt => apt_plan(package,&action)?, Source::Flatpak => flatpak_plan(package,&action)?, Source::Snap => snap_plan(package,&action)?,
+        Source::Appimage => appimage_plan(package,&action)?,
     };
     let mut bytes = [0u8;32];
-    getrandom::getrandom(&mut bytes).map_err(|e| format!("Impossibile generare un token sicuro: {e}"))?;
+    getrandom::getrandom(&mut bytes).map_err(|e| tr!("Cannot generate a secure token: {}", e))?;
     let token = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
-    let command = invocation.display();
-    let mut plans = PLANS.get_or_init(|| Mutex::new(HashMap::new())).lock().map_err(|_|"Archivio piani non disponibile.")?;
+    let command = match &proof { Proof::Appimage(prepared) => prepared.describe(), _ => invocation.display() };
+    let mut plans = PLANS.get_or_init(|| Mutex::new(HashMap::new())).lock().map_err(|_|tr!("Plan store not available."))?;
     plans.retain(|_,p| p.created.elapsed() < PLAN_TTL);
     if plans.len() >= 20 { plans.clear(); }
-    plans.insert(token.clone(),Pending {created:Instant::now(),invocation,proof,info:OperationInfo {action:action.clone(),label:label.clone(),source:match selected_source {Source::Apt=>"apt",Source::Flatpak=>"flatpak",Source::Snap=>"snap"}.into()}});
-    let verb = match action.as_str() {"install"=>"Installa","remove"=>"Rimuovi","update"=>"Aggiorna",_=>"Aggiorna indici"};
-    Ok(Plan {token,title:format!("{verb} {label}"),summary:if requires_admin {"Richiede conferma e autenticazione amministratore quando richiesta dal sistema.".into()}
-        else {"Richiede la tua conferma prima di modificare il sistema.".into()},command,details,requires_admin})
+    plans.insert(token.clone(),Pending {created:Instant::now(),invocation,proof,info:OperationInfo {action:action.clone(),label:label.clone(),source:match selected_source {Source::Apt=>"apt",Source::Flatpak=>"flatpak",Source::Snap=>"snap",Source::Appimage=>"appimage"}.into()}});
+    let verb = match action.as_str() {"install"=>tr!("Install"),"remove"=>tr!("Remove"),"update"=>tr!("Update"),_=>tr!("Refresh indexes")};
+    Ok(Plan {token,title:format!("{verb} {label}"),summary:if requires_admin {tr!("Needs your confirmation and administrator authentication when the system asks for it.")}
+        else {tr!("Needs your confirmation before changing the system.")},command,details,requires_admin})
 }
 
 pub fn execute_operation(token: String) -> Result<OperationResult> {
     ensure_ubuntu()?;
-    if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) { return Err("Token di conferma non valido.".into()); }
+    if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) { return Err(tr!("Invalid confirmation token.")); }
     if MUTATING.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).is_err() {
-        return Err("Un'altra operazione è già in corso.".into());
+        return Err(tr!("Another operation is already in progress."));
     }
     // This gate spans revalidation and execution. A token is consumed even if the
     // operation fails, so retries always require a new human-reviewed plan.
     let result = (|| {
-        let plan = PLANS.get_or_init(||Mutex::new(HashMap::new())).lock().map_err(|_|"Archivio piani non disponibile.")?
-            .remove(&token).ok_or("Conferma mancante o già utilizzata. Prepara un nuovo piano.")?;
-        if plan.created.elapsed() >= PLAN_TTL { return Err("Il piano è scaduto. Riapri la conferma per generarne uno nuovo.".into()); }
+        let plan = PLANS.get_or_init(||Mutex::new(HashMap::new())).lock().map_err(|_|tr!("Plan store not available."))?
+            .remove(&token).ok_or_else(|| tr!("Confirmation missing or already used. Prepare a new plan."))?;
+        if plan.created.elapsed() >= PLAN_TTL { return Err(tr!("The plan has expired. Reopen the confirmation to generate a new one.")); }
         if let Ok(mut current) = CURRENT.lock() { *current = Some(plan.info.clone()); }
         match &plan.proof {
             Proof::Apt {simulation,effects,target,action} => {
                 let current = apt_effects(&run_checked(simulation)?)?;
                 check_removals(&current,target,action)?;
-                if &current != effects { return Err("Lo stato APT è cambiato. Rivedi un nuovo piano prima di procedere.".into()); }
+                if &current != effects { return Err(tr!("The APT state has changed. Review a new plan before proceeding.")); }
             },
             Proof::Flatpak {checks,remotes:approved_remotes} => {
-                if &remotes()? != approved_remotes { return Err("Repository Flatpak modificati (ambito, URL o verifica GPG). Prepara un nuovo piano.".into()); }
+                if &remotes()? != approved_remotes { return Err(tr!("Flatpak remotes have changed (scope, URL or GPG verification). Prepare a new plan.")); }
                 for (inv,expected) in checks {
-                    if run_checked(inv)?.trim() != expected { return Err("I metadati o lo stato Flatpak sono cambiati. Prepara un nuovo piano.".into()); }
+                    if run_checked(inv)?.trim() != expected { return Err(tr!("The Flatpak metadata or state has changed. Prepare a new plan.")); }
                 }
             },
             Proof::Snap {action,approved} => {
                 if &snap_approval(&approved.name,action,&approved.channel)? != approved {
-                    return Err("Identità, canale o revisione Snap sono cambiati. Prepara un nuovo piano prima di procedere.".into());
+                    return Err(tr!("The Snap identity, channel or revision has changed. Prepare a new plan before proceeding."));
                 }
+            },
+            Proof::Appimage(prepared) => {
+                let (success, output) = crate::appimage::execute(prepared);
+                return Ok(OperationResult {success, output});
             },
             Proof::None => {},
         }
         let result = run(&plan.invocation,MUTATION_TIMEOUT,true)?;
         Ok(OperationResult {success:result.success,output:if result.text.trim().is_empty() {
-            if result.success {"Operazione completata.".into()} else {"Operazione annullata o non riuscita. Nessun dettaglio restituito dal gestore pacchetti.".into()}
+            if result.success {tr!("Operation completed.")} else {tr!("Operation cancelled or failed. The package manager returned no details.")}
         } else {result.text}})
     })();
     // In the exceptionally rare unkillable-process case, the monitor in run()
     // owns this gate until actual process termination.
     if let Ok(mut current) = CURRENT.lock() { *current = None; }
-    let held = result.as_ref().err().map(|e: &String| e.contains("Il processo è ancora attivo")).unwrap_or(false);
+    let held = result.is_err() && PROCESS_HELD.swap(false, Ordering::AcqRel);
     if !held { MUTATING.store(false,Ordering::Release); }
     result
 }
@@ -1221,7 +1265,7 @@ pub fn smoke_test() -> Result<serde_json::Value> {
     let found = search_packages("gimp".into(),"apt".into())?;
     let installed = list_installed("all".into())?;
     let updates = list_updates("all".into())?;
-    let gimp = found.iter().find(|p|p.id == "gimp").cloned().ok_or("Ricerca reale gimp senza risultati.")?;
+    let gimp = found.iter().find(|p|p.id == "gimp").cloned().ok_or("Real search for gimp returned no results.")?;
     let details = package_details(gimp.clone())?;
     let (plan_action,plan_package) = if gimp.installed {("remove",gimp.clone())} else {("install",gimp.clone())};
     let plan = prepare_operation(Some(plan_package),plan_action.into(),None)?;
@@ -1231,7 +1275,7 @@ pub fn smoke_test() -> Result<serde_json::Value> {
         installed:true,update_available:false,remote:None,scope:None,publisher:None,channel:None,confinement:None,kind:default_package_kind(),icon_url:None,app_id:None,categories:Vec::new()};
     let rejects_essential = prepare_operation(Some(bash),"remove".into(),None).is_err();
     let rejects_token = execute_operation("invalid-token".into()).is_err();
-    if !rejects_invalid || !rejects_essential || !rejects_token { return Err("Una verifica di sicurezza non è riuscita.".into()); }
+    if !rejects_invalid || !rejects_essential || !rejects_token { return Err("A safety check failed.".into()); }
     Ok(serde_json::json!({"ok":true,"system":system,"searchCount":found.len(),"searchSample":found.iter().take(4).collect::<Vec<_>>(),
         "installedCount":installed.len(),"updatesCount":updates.len(),"updates":updates,"details":details,
         "dryRun":{"title":plan.title,"command":plan.command,"details":plan.details},
@@ -1243,17 +1287,17 @@ fn snap_smoke_test() -> Result<serde_json::Value> {
     let found=search_packages("gimp".into(),"snap".into())?;
     let installed=list_installed("snap".into())?;
     let updates=list_updates("snap".into())?;
-    let gimp=found.iter().find(|p|p.id == "gimp").cloned().ok_or("Ricerca Snap reale gimp senza risultati.")?;
+    let gimp=found.iter().find(|p|p.id == "gimp").cloned().ok_or("Real Snap search for gimp returned no results.")?;
     let details=package_details(gimp)?;
     let hello=snap_package(&snap_store_record("hello-world")?,false,false)?;
     let install_plan=prepare_operation(Some(hello.clone()),"install".into(),None)?;
     let classic=snap_package(&snap_store_record("code")?,false,false)?;
     let classic_rejected=prepare_operation(Some(classic),"install".into(),None).is_err();
-    let critical=installed.iter().find(|p|p.id == "core24" || p.id == "snapd").cloned().ok_or("Nessun componente Snap critico disponibile per la prova.")?;
+    let critical=installed.iter().find(|p|p.id == "core24" || p.id == "snapd").cloned().ok_or("No critical Snap component available for the test.")?;
     let critical_rejected=prepare_operation(Some(critical),"remove".into(),None).is_err();
     let mut invalid=hello; invalid.id="--classic".into();
     let invalid_rejected=prepare_operation(Some(invalid),"install".into(),None).is_err();
-    if !classic_rejected || !critical_rejected || !invalid_rejected {return Err("Verifica di sicurezza Snap non riuscita.".into());}
+    if !classic_rejected || !critical_rejected || !invalid_rejected {return Err("Snap safety check failed.".into());}
     Ok(serde_json::json!({"searchCount":found.len(),"searchSample":found.iter().take(3).collect::<Vec<_>>(),"installedCount":installed.len(),"updatesCount":updates.len(),
         "details":details,"dryRun":{"title":install_plan.title,"command":install_plan.command,"details":install_plan.details},
         "safety":{"classicRejected":classic_rejected,"criticalRemovalRejected":critical_rejected,"invalidNameRejected":invalid_rejected},"mutationsExecuted":false}))
@@ -1294,7 +1338,7 @@ mod tests {
         let identity=snap_identity(&fixture,"latest/stable",true).unwrap();
         assert_eq!(identity.revision,"29"); assert_eq!(identity.channel,"latest/stable");
         let package=snap_package(&fixture,false,false).unwrap();
-        assert_eq!(package.source,Source::Snap); assert_eq!(package.publisher.as_deref(),Some("Canonical (@canonical) · verificato"));
+        assert_eq!(package.source,Source::Snap); assert_eq!(package.publisher.as_deref(),Some("Canonical (@canonical) · verified"));
         assert_eq!(package.kind,"application");
         for mode in ["classic","devmode"] {
             let mut unsafe_snap=fixture.clone();unsafe_snap["channels"]["latest/stable"]["confinement"]=mode.into();
@@ -1326,14 +1370,14 @@ mod tests {
     }
     #[test]
     fn system_changes_capture_output_from_a_file_and_survive_without_pipes() {
-        let result=run(&Invocation::new("/bin/sh",&["-c","echo fuori; echo errore 1>&2; exit 3"]),Duration::from_secs(10),true).unwrap();
+        let result=run(&Invocation::new("/bin/sh",&["-c","echo out; echo err 1>&2; exit 3"]),Duration::from_secs(10),true).unwrap();
         assert!(!result.success);
-        assert!(result.text.contains("fuori") && result.text.contains("errore"),"{}",result.text);
+        assert!(result.text.contains("out") && result.text.contains("err"),"{}",result.text);
         let ok=run(&Invocation::new("/bin/sh",&["-c","printf 'x%.0s' $(seq 1 5000)"]),Duration::from_secs(10),true).unwrap();
         assert!(ok.success && ok.text.len() == 5000);
         // The child writes to a file, so an output that nobody reads cannot stop it with SIGPIPE.
-        let long=run(&Invocation::new("/bin/sh",&["-c","i=0; while [ $i -lt 20000 ]; do echo riga $i; i=$((i+1)); done; echo finito"]),Duration::from_secs(20),true).unwrap();
-        assert!(long.success && long.text.trim_end().ends_with("finito"));
+        let long=run(&Invocation::new("/bin/sh",&["-c","i=0; while [ $i -lt 20000 ]; do echo line $i; i=$((i+1)); done; echo done"]),Duration::from_secs(20),true).unwrap();
+        assert!(long.success && long.text.trim_end().ends_with("done"));
         let leftovers=fs::read_dir(std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|p|p.is_dir()).unwrap_or_else(std::env::temp_dir)).unwrap()
             .filter_map(|e|e.ok()).filter(|e|e.file_name().to_string_lossy().starts_with(&format!("nexa-store-{}-",std::process::id()))).count();
         assert_eq!(leftovers,0,"temporary output files are always deleted");
@@ -1429,11 +1473,11 @@ mod tests {
                 invocation:Invocation::new("/usr/bin/false",&[]),proof:Proof::None,info:OperationInfo {action:"test".into(),label:"test".into(),source:"apt".into()}});
         }
         let error=execute_operation(expired.clone()).unwrap_err();
-        assert!(error.contains("scaduto"));
-        assert!(execute_operation(expired).unwrap_err().contains("già utilizzata"));
+        assert!(error.contains("expired"));
+        assert!(execute_operation(expired).unwrap_err().contains("already used"));
         // /usr/bin/false is harmless. Even its failed execution consumes consent.
         assert!(!execute_operation(consumed.clone()).unwrap().success);
-        assert!(execute_operation(consumed).unwrap_err().contains("già utilizzata"));
+        assert!(execute_operation(consumed).unwrap_err().contains("already used"));
         assert!(!MUTATING.load(Ordering::Acquire));
     }
 }

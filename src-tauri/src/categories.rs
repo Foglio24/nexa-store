@@ -4,37 +4,37 @@
 //! the Snap Store uses its own "sections". Everything is mapped onto one small,
 //! fixed list so the same category page works for every source.
 
-/// Category ids in display order. The Italian labels and icons live in the frontend.
+/// Category ids in display order. The labels and icons live in the frontend.
 pub const CATEGORY_IDS: [&str; 10] = [
-    "giochi", "internet", "audio-video", "grafica", "ufficio",
-    "sviluppo", "istruzione", "scienza", "utilita", "sistema",
+    "games", "internet", "audio-video", "graphics", "office",
+    "development", "education", "science", "utilities", "system",
 ];
 
 pub fn is_category(id: &str) -> bool { CATEGORY_IDS.contains(&id) }
 
 /// Map one freedesktop category name (e.g. `ArcadeGame`, `Graphics`) onto a store category.
 pub fn from_freedesktop(raw: &str) -> Option<&'static str> {
-    if raw == "Game" || raw.ends_with("Game") { return Some("giochi"); }
+    if raw == "Game" || raw.ends_with("Game") { return Some("games"); }
     Some(match raw {
         "Network" | "WebBrowser" | "Email" | "InstantMessaging" | "Chat" | "IRCClient" | "FileTransfer"
         | "P2P" | "Feed" | "News" | "VideoConference" | "RemoteAccess" | "Telephony" => "internet",
         "AudioVideo" | "Audio" | "Video" | "Player" | "Music" | "Midi" | "Mixer" | "Sequencer" | "Tuner"
         | "Recorder" | "AudioVideoEditing" | "DiscBurning" | "Radio" | "TV" | "Jukebox" => "audio-video",
         "Graphics" | "2DGraphics" | "3DGraphics" | "RasterGraphics" | "VectorGraphics" | "Photography"
-        | "Scanning" | "OCR" | "ImageProcessing" | "Publishing" => "grafica",
+        | "Scanning" | "OCR" | "ImageProcessing" | "Publishing" => "graphics",
         "Office" | "WordProcessor" | "Spreadsheet" | "Presentation" | "Calendar" | "ContactManagement"
-        | "Database" | "Dictionary" | "Chart" | "Finance" | "ProjectManagement" | "FlowChart" => "ufficio",
+        | "Database" | "Dictionary" | "Chart" | "Finance" | "ProjectManagement" | "FlowChart" => "office",
         "Development" | "IDE" | "Debugger" | "GUIDesigner" | "Profiling" | "RevisionControl"
-        | "Translation" | "WebDevelopment" | "Building" => "sviluppo",
+        | "Translation" | "WebDevelopment" | "Building" => "development",
         "Education" | "Languages" | "Literature" | "Geography" | "History" | "ComputerScience" | "Art"
-        | "ArtificialIntelligence" | "Construction" => "istruzione",
+        | "ArtificialIntelligence" | "Construction" => "education",
         "Science" | "Math" | "Astronomy" | "Biology" | "Chemistry" | "Geology" | "Physics" | "Electronics"
         | "Engineering" | "DataVisualization" | "NumericalAnalysis" | "MedicalSoftware" | "Robotics"
-        | "Geoscience" | "ParallelComputing" => "scienza",
+        | "Geoscience" | "ParallelComputing" => "science",
         "Utility" | "Accessibility" | "Archiving" | "Compression" | "Calculator" | "Clock" | "TextEditor"
-        | "FileManager" | "TerminalEmulator" | "FileTools" | "TextTools" => "utilita",
+        | "FileManager" | "TerminalEmulator" | "FileTools" | "TextTools" => "utilities",
         "System" | "Settings" | "Monitor" | "Security" | "PackageManager" | "HardwareSettings"
-        | "DesktopSettings" | "Filesystem" | "Emulator" => "sistema",
+        | "DesktopSettings" | "Filesystem" | "Emulator" => "system",
         _ => return None,
     })
 }
@@ -53,16 +53,16 @@ pub fn from_freedesktop_list<S: AsRef<str>>(raw: &[S]) -> Vec<&'static str> {
 /// Snap Store section (as listed by snapd's `/v2/sections`) → store category.
 pub fn from_snap_section(section: &str) -> Option<&'static str> {
     Some(match section {
-        "games" => "giochi",
+        "games" => "games",
         "social" | "news-and-weather" => "internet",
         "music-and-audio" | "entertainment" => "audio-video",
-        "photo-and-video" | "art-and-design" => "grafica",
-        "productivity" | "finance" => "ufficio",
-        "development" => "sviluppo",
-        "education" | "books-and-reference" => "istruzione",
-        "science" => "scienza",
-        "utilities" | "personalisation" | "health-and-fitness" => "utilita",
-        "security" | "server-and-cloud" | "devices-and-iot" => "sistema",
+        "photo-and-video" | "art-and-design" => "graphics",
+        "productivity" | "finance" => "office",
+        "development" => "development",
+        "education" | "books-and-reference" => "education",
+        "science" => "science",
+        "utilities" | "personalisation" | "health-and-fitness" => "utilities",
+        "security" | "server-and-cloud" | "devices-and-iot" => "system",
         _ => return None,
     })
 }
@@ -92,14 +92,14 @@ mod tests {
 
     #[test]
     fn freedesktop_categories_map_onto_store_categories() {
-        assert_eq!(from_freedesktop("ArcadeGame"), Some("giochi"));
-        assert_eq!(from_freedesktop("Game"), Some("giochi"));
+        assert_eq!(from_freedesktop("ArcadeGame"), Some("games"));
+        assert_eq!(from_freedesktop("Game"), Some("games"));
         assert_eq!(from_freedesktop("WebBrowser"), Some("internet"));
-        assert_eq!(from_freedesktop("Graphics"), Some("grafica"));
+        assert_eq!(from_freedesktop("Graphics"), Some("graphics"));
         assert_eq!(from_freedesktop("GTK"), None);
         assert_eq!(from_freedesktop("Qt"), None);
         let list = from_freedesktop_list(&["Graphics", "2DGraphics", "GTK", "Education", "RasterGraphics"]);
-        assert_eq!(list, vec!["grafica", "istruzione"]);
+        assert_eq!(list, vec!["graphics", "education"]);
     }
 
     #[test]
