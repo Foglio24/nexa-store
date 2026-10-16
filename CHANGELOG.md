@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.1 — 2026-10-16
+
+One button to check for updates.
+
+- **The Updates page has a single "Check for updates" button.** It refreshes the APT package lists, the Flatpak catalog and the Snap list, one after the other, and then shows what can be updated. Before, the page only read the lists already on the computer and the refresh needed three separate buttons (APT, Flatpak, Snap): updates from third-party repositories, such as Microsoft Edge or ChatGPT, did not appear until the APT lists were refreshed by hand.
+- **No password for the check.** The APT lists are refreshed through PackageKit, the service the Ubuntu Software Updater uses, which Ubuntu lets a person at the computer do without a password (polkit action `org.freedesktop.packagekit.system-sources-refresh`). Nothing is added to the system: no polkit rule, no helper. If PackageKit is missing or refuses, the standard `pkexec apt-get update` is used instead and the result says so. Installing, updating and removing APT packages still asks for the password.
+- A source that is missing or fails does not stop the others, and the result lists each step. The notification at the end says how many updates were found; AppImage releases are looked up afresh.
+- `scripts/test-gui.py` no longer runs any operation unless `NEXA_RUN_CHECK=1` (which runs the real check); `scripts/test-background.py` starts its Snap check through the backend commands.
+
 ## 0.6.0 — 2026-10-15
 
 AppImage, and an interface in English and Italian.

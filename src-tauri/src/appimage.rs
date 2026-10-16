@@ -538,6 +538,9 @@ fn latest_release(id: &str) -> Result<Release> {
     Ok(release)
 }
 
+/// Forget the remembered releases, so the next look at GitHub is a fresh one (an update check).
+pub fn forget_releases() { *RELEASES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None; }
+
 pub fn updates() -> Result<Vec<Package>> {
     let paths = Paths::system()?;
     let mut result = Vec::new();

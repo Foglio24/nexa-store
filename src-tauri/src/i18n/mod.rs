@@ -159,9 +159,9 @@ mod tests {
 
     /// Every `tr!("…")` in the sources, with escapes resolved.
     fn messages_in_sources() -> Vec<(String, String)> {
-        const SOURCES: [(&str, &str); 7] = [
+        const SOURCES: [(&str, &str); 8] = [
             ("backend.rs", include_str!("../backend.rs")), ("store.rs", include_str!("../store.rs")), ("notify.rs", include_str!("../notify.rs")),
-            ("lib.rs", include_str!("../lib.rs")), ("catalog.rs", include_str!("../catalog.rs")), ("appimage.rs", include_str!("../appimage.rs")),
+            ("lib.rs", include_str!("../lib.rs")), ("catalog.rs", include_str!("../catalog.rs")), ("appimage.rs", include_str!("../appimage.rs")), ("packagekit.rs", include_str!("../packagekit.rs")),
             ("categories.rs", include_str!("../categories.rs")),
         ];
         let mut found = Vec::new();

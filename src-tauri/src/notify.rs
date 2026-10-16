@@ -47,6 +47,10 @@ fn escape(text: &str) -> String {
 /// Title and text announcing that an operation has ended.
 pub fn finished_message(action: &str, label: &str, success: bool) -> (String, String) {
     let label = escape(label);
+    if action == "check" {
+        return if success { (tr!("Update check finished"), tr!("Nexa Store has refreshed the lists and looked for updates.")) }
+            else { (tr!("Update check failed"), tr!("Open Nexa Store to see the details.")) };
+    }
     if !success {
         let summary = if action == "refresh" { tr!("Check of {} failed", label) } else { tr!("{}: operation failed", label) };
         return (summary, tr!("Open Nexa Store to see the details."));
@@ -59,6 +63,16 @@ pub fn finished_message(action: &str, label: &str, success: bool) -> (String, St
     }
 }
 
+/// What an update check found, for the end-of-check notification (`None`: the count could not be read).
+pub fn updates_found_message(count: Option<usize>) -> String {
+    match count {
+        Some(0) => tr!("No updates available."),
+        Some(1) => tr!("1 update is available."),
+        Some(count) => tr!("{} updates are available.", count),
+        None => tr!("Open Nexa Store to see the updates."),
+    }
+}
+
 /// Title and text shown when the window is closed while an operation is still running.
 pub fn background_message(action: &str, label: &str) -> (String, String) {
     let label = escape(label);
@@ -66,6 +80,7 @@ pub fn background_message(action: &str, label: &str) -> (String, String) {
         "install" => tr!("Installing {}. You'll get a notification as soon as it ends.", label),
         "remove" => tr!("Removing {}. You'll get a notification as soon as it ends.", label),
         "update" => tr!("Updating {}. You'll get a notification as soon as it ends.", label),
+        "check" => tr!("Checking for updates. You'll get a notification as soon as it ends."),
         _ => tr!("Checking {}. You'll get a notification as soon as it ends.", label),
     };
     (tr!("Nexa Store keeps going in the background"), text)
@@ -134,6 +149,13 @@ mod tests {
         assert_eq!(title, "Nexa Store keeps going in the background");
         assert_eq!(text, "Installing GIMP. You'll get a notification as soon as it ends.");
         assert!(background_message("remove", "x").1.starts_with("Removing x"));
+        assert_eq!(finished_message("check", "", true).0, "Update check finished");
+        assert_eq!(finished_message("check", "", false).0, "Update check failed");
+        assert!(background_message("check", "").1.starts_with("Checking for updates."));
+        assert_eq!(updates_found_message(Some(0)), "No updates available.");
+        assert_eq!(updates_found_message(Some(1)), "1 update is available.");
+        assert_eq!(updates_found_message(Some(5)), "5 updates are available.");
+        assert!(updates_found_message(None).contains("Open Nexa Store"));
     }
 
     #[test]
@@ -151,6 +173,9 @@ mod tests {
             assert_eq!(title, "Nexa Store continua in background");
             assert_eq!(text, "Installazione di GIMP in corso: ti avviso appena termina.");
             assert!(background_message("remove", "x").1.starts_with("Rimozione di x"));
+            assert_eq!(finished_message("check", "", true).0, "Controllo aggiornamenti terminato");
+            assert_eq!(updates_found_message(Some(3)), "Ci sono 3 aggiornamenti disponibili.");
+            assert_eq!(updates_found_message(Some(1)), "C'è 1 aggiornamento disponibile.");
         });
     }
 

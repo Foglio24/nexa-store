@@ -16,8 +16,8 @@ import { useStore } from '../StoreContext';
 const single = (pkg: StorePackage): AppGroup => ({ key: packageKey(pkg), name: pkg.name, summary: pkg.summary, iconUrl: trustedLogoUrl(pkg), variants: [pkg] });
 
 /** Installed software or available updates: one row per package, with a text filter. */
-export default function ListPage({ mode, filter, sources, refreshTick, flatpakReady, snapReady }: {
-  mode: 'installed' | 'updates'; filter: string; sources: SourceFilter[]; refreshTick: number; flatpakReady: boolean; snapReady: boolean;
+export default function ListPage({ mode, filter, sources, refreshTick }: {
+  mode: 'installed' | 'updates'; filter: string; sources: SourceFilter[]; refreshTick: number;
 }) {
   const t = useT();
   const { desktop, prepare, busy } = useStore();
@@ -41,18 +41,15 @@ export default function ListPage({ mode, filter, sources, refreshTick, flatpakRe
         <Segmented label={t('Source')} value={source} onChange={setSource} options={sources.map(value => ({ value, label: value === 'all' ? t('All') : sourceLabels[value] }))} />
       </>} />
     {mode === 'updates' && <div className="toolbar">
-      <span className="toolbar-label">{t('Check for updates:')}</span>
-      <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => prepare('refresh', undefined, 'apt')}><RefreshCw size={14} />APT</button>
-      {flatpakReady && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => prepare('refresh', undefined, 'flatpak')}><RefreshCw size={14} />Flatpak</button>}
-      {snapReady && <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => prepare('refresh', undefined, 'snap')} title={t('Lists the updates available in the Snap Store, without installing anything')}><RefreshCw size={14} />Snap</button>}
-      <button className="btn btn-ghost btn-sm" disabled={request.loading} onClick={request.reload}>{t('Check again')}</button>
+      <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => prepare('refresh', undefined, 'all')}><RefreshCw size={14} />{t('Check for updates')}</button>
+      <span className="toolbar-label">{t('Refreshes the APT lists, the Flatpak catalog and the Snap list, then shows what can be updated.')}</span>
     </div>}
     {request.error ? <ErrorState message={request.error} onRetry={request.reload} />
       : request.loading && !request.data ? <SkeletonGrid rows count={7} />
       : shown.length === 0 ? <EmptyState icon={mode === 'updates' ? <CheckCircle2 size={34} strokeWidth={1.5} /> : undefined}
           title={mode === 'updates' ? (kind === 'package' ? t('No updates for technical packages.') : t('Everything is up to date.')) : text ? t('No results for this filter.') : t('No software in this view.')}
           action={matching.length > 0 && kind !== 'all' ? <button className="btn btn-secondary" onClick={() => setKind('all')}>{t('Show everything')}</button> : undefined}>
-          {mode === 'updates' ? t('APT and Flatpak use the local lists, Snap checks the stable channel and AppImage compares the latest GitHub release.') : undefined}</EmptyState>
+          {mode === 'updates' ? t('Updates are read from the lists on this computer: press “Check for updates” to refresh them first.') : undefined}</EmptyState>
       : <div className="rows" aria-busy={request.loading}>{shown.map(group => <AppRow key={group.key} group={group} mode={mode} />)}</div>}
   </div>;
 }

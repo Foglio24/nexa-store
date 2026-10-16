@@ -19,6 +19,7 @@ A desktop app store for Ubuntu: **search, discover and manage software from APT,
 - **Available in English and Italian**, following the system language.
 - **Search** by name – apps first, with the real name and **logo**; libraries and technical packages stay apart and can be included.
 - **Installed** and **Updates** lists with removal and per-app updates, and an **Open** button to start installed apps.
+- **One "Check for updates" button**: it refreshes the APT package lists (so updates from third-party repositories show up too), the Flatpak catalog and the Snap list in one go, then shows what can be updated. The APT lists are refreshed through PackageKit, like the Ubuntu Software Updater does, so **no password is asked**. Without the button the page only reads the lists already on the computer.
 - **Summary and confirmation** before every change, with dependencies, permissions and the exact command available.
 - **Operations that keep going with the window closed** – you can close the store while it installs, and a **notification** tells you when it is done.
 - A Debian package, a store icon and an optional launcher for the user's application menu.
@@ -37,7 +38,7 @@ There is no telemetry and no data about you is sent anywhere. Apps are read from
 Download the `.deb` from the [latest release](../../releases/latest) and install it with APT, which pulls in the dependencies:
 
 ```bash
-sudo apt install ./nexa-store_0.6.0_ubuntu26.10_amd64.deb
+sudo apt install ./nexa-store_0.6.1_ubuntu26.10_amd64.deb
 ```
 
 The package recommends `libfuse2t64`, which AppImages need to start normally (without it Nexa Store still runs them, by unpacking them first). The package is built for **Ubuntu 26.10 on amd64**. On other Ubuntu versions, [build from source](#build-from-source): a binary built on a recent release can need newer libraries than an older one provides. The SHA-256 checksum is in `SHA256SUMS.txt` next to the package.
@@ -145,6 +146,8 @@ The backend validates identifiers and starts executables with explicit arguments
 
 **Flatpak.** No remote is added automatically. New installs need a user remote; updates and removals keep the scope of the installed app. The confirmation shows the ref, the commit and the declared permissions. Updates pin the approved commit. For new installs Flatpak offers no option to pin the commit, so the ref, the commit and the remote configuration are checked again right before starting. Runtimes and dependencies are resolved by Flatpak during the transaction.
 
+**Check for updates.** It runs, one after the other and each with its own re-check right before it starts, the APT list refresh, `flatpak update --user --appstream` and `snap refresh --list`. The APT lists are refreshed with a single D-Bus call to PackageKit (`RefreshCache`): Ubuntu's own polkit rule `org.freedesktop.packagekit.system-sources-refresh` lets a person using the computer do that without a password, and Nexa Store adds no rule, helper or privileged code. If PackageKit is missing or refuses, it falls back to `pkexec apt-get update` and says so (that one asks for the password). A source that is missing or cannot be refreshed is skipped and said so; a step that fails does not stop the others and the result lists each step. It installs and upgrades nothing, and a notification says how many updates were found. Installing, updating and removing APT packages still asks for the administrator password, on purpose.
+
 **Snap.** Only apps with **strict** confinement from the **stable** channel can be managed. Operations concern a single name: there is no global `snap refresh`. Classic, devmode and system components (kernel, gadget, base and snapd types) are excluded. The app's identity and conditions are checked again before execution. snapd keeps its own automatic-update policy; Nexa Store does not reconfigure it.
 
 **AppImage.** The identifier is a validated `owner/repo`; every address is checked against an allow-list, redirects included; the download is bounded in size and time and written to a private partial file that is deleted on any failure; size, checksum and file header are verified before the file becomes executable; paths are built from validated parts and the install record is re-validated before every use (a hand-edited or symlinked record is ignored). Removal only deletes the app's own folder and a launcher this module wrote.
@@ -159,7 +162,7 @@ Run the Rust tests with `npm run test:rust` and the translation check with `npm 
 ./src-tauri/target/release/nexa-store --smoke-test
 ```
 
-`scripts/test-gui.py` is a **read-only** UI check of the real app: home, categories, changing proposals, a category page, search, details with source choice, logos, the installed list, a second launch of the app and an install confirmation (then cancelled). The only operation it runs is `snap refresh --list`, which lists updates without applying them:
+`scripts/test-gui.py` is a **read-only** UI check of the real app: home, categories, changing proposals, a category page, search, details with source choice, logos, the installed list, a second launch of the app and an install confirmation and the update-check confirmation (both cancelled). It never runs an operation unless you set `NEXA_RUN_CHECK=1`, which also runs the update check (it refreshes the package lists and installs nothing; no password is asked when PackageKit allows it, otherwise Ubuntu asks for it):
 
 ```bash
 python3 scripts/test-gui.py
@@ -167,7 +170,7 @@ python3 scripts/test-gui.py
 
 The script runs the app in English; use `NEXA_LANG=it python3 scripts/test-gui.py` for the Italian run. It needs Python 3, `tauri-driver`, `WebKitWebDriver`, a graphical session and the release binary; set `NEXA_TAURI_DRIVER=/path/to/tauri-driver` if the driver is not in `PATH`. Reports and screenshots are written to `verification/`, which is not part of the repository. Do not run it while other operations are running in the app.
 
-`scripts/test-background.py` checks operations with the window closed: it starts the Snap check from the UI (read-only, about half a second), closes the window while it runs with the same message the close button sends, and checks on the D-Bus that both notifications arrive, that the final one is not deleted after the app exits, and that the app quits by itself. It also checks that, with no operation, closing is immediate and silent. **Real notifications appear on the desktop during the run.** It additionally needs `dbus-monitor` and `xprop`:
+`scripts/test-background.py` checks operations with the window closed: it starts the Snap check (read-only, about half a second) through the app's backend commands, the same ones the interface calls (the interface's single check button also refreshes APT), closes the window while it runs with the same message the close button sends, and checks on the D-Bus that both notifications arrive, that the final one is not deleted after the app exits, and that the app quits by itself. It also checks that, with no operation, closing is immediate and silent. **Real notifications appear on the desktop during the run.** It additionally needs `dbus-monitor` and `xprop`:
 
 ```bash
 python3 scripts/test-background.py

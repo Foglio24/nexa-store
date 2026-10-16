@@ -39,7 +39,7 @@ function App() {
   const [detail, setDetail] = useState<AppGroup | null>(null);
   const [plan, setPlan] = useState<Plan | null>(null);
   const [planAction, setPlanAction] = useState<Action>('install');
-  const [planSource, setPlanSource] = useState<PackageSource | undefined>();
+  const [planSource, setPlanSource] = useState<PackageSource | 'all' | undefined>();
   const [preparing, setPreparing] = useState(false);
   const [running, setRunning] = useState(false);
   const [operationError, setOperationError] = useState('');
@@ -90,7 +90,7 @@ function App() {
   }, [t]);
   const closeDetails = useCallback(() => setDetail(null), []);
   const closePlan = useCallback(() => { if (!transactionLock.current) setPlan(null); }, []);
-  const prepare = useCallback(async (action: Action, pkg?: StorePackage, specificSource?: PackageSource) => {
+  const prepare = useCallback(async (action: Action, pkg?: StorePackage, specificSource?: PackageSource | 'all') => {
     if (!desktop || transactionLock.current) return;
     transactionLock.current = true; setPreparing(true); setOperationError(''); setNotice(''); setDetail(null);
     try {
@@ -104,14 +104,17 @@ function App() {
     if (!plan || transactionLock.current || !desktop) return;
     transactionLock.current = true; setRunning(true); setOperationError('');
     const current = plan;
+    // Checking for updates ends on the Updates page, with what it found.
+    const isCheck = planAction === 'refresh' && planSource === 'all';
     const activityId = Date.now();
     setActivities(items => [{ id: activityId, title: current.title, status: 'running', output: t('Operation in progress. The full output will be available when it ends.'), startedAt: new Date() }, ...items]);
     setPlan(null); setView('activity'); setCategory(null); setQuery('');
     try {
       const result = await invoke<OperationResult>('execute_operation', { token: current.token });
       setActivities(items => items.map(item => item.id === activityId ? { ...item, status: result.success ? 'success' : 'error', output: result.output || (result.success ? t('Operation completed.') : t('Operation did not complete.')) } : item));
-      setNotice(result.success ? t('Operation completed.') : t('Operation did not complete: see the details.'));
+      setNotice(isCheck && result.success ? t('Update check finished.') : result.success ? t('Operation completed.') : t('Operation did not complete: see the details.'));
       setRefreshTick(value => value + 1); void loadSystem();
+      if (isCheck && result.success) setView('updates');
     } catch (cause) {
       setActivities(items => items.map(item => item.id === activityId ? { ...item, status: 'error', output: errorText(cause) } : item));
       setOperationError(errorText(cause));
@@ -183,7 +186,7 @@ function App() {
           {view === 'explore' && searching && <SearchPage query={trimmed} sources={sources} refreshTick={refreshTick} />}
           {view === 'explore' && !searching && category && <CategoryPage key={category} category={category} sources={sources} refreshTick={refreshTick} onBack={() => setCategory(null)} />}
           {view === 'explore' && !searching && !category && <ExplorePage data={home.data} loading={home.loading} error={home.error} onShuffle={() => setHomeSeed(newSeed())} onRetry={home.reload} />}
-          {(view === 'installed' || view === 'updates') && <ListPage key={view} mode={view} filter={query} sources={sources} refreshTick={refreshTick} flatpakReady={flatpakReady} snapReady={!!system?.snapAvailable} />}
+          {(view === 'installed' || view === 'updates') && <ListPage key={view} mode={view} filter={query} sources={sources} refreshTick={refreshTick} />}
           {view === 'activity' && <ActivityPage items={activities} onExplore={() => go('explore')} />}
         </div>
       </main>

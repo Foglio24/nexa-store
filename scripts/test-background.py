@@ -2,7 +2,9 @@
 """Check that an operation keeps going with the window closed, and that notifications arrive.
 
 It does not change the system: it uses the Snap update check (`snap refresh --list`, read-only),
-which takes about half a second. The script starts it from the real interface and, while it runs,
+which takes about half a second. The interface has a single "Check for updates" button that also
+refreshes APT (and asks for the administrator password), so the script starts the Snap-only check
+through the app's own backend commands, the same ones the interface calls, and, while it runs,
 closes the window with the same message the close button sends (WM_DELETE_WINDOW).
 
 Expected: the window hides without stopping the operation, one "continues in the background"
@@ -44,6 +46,11 @@ def req(method, route, payload=None):
 
 def cmd(method, route, payload=None): return req(method, f'/session/{session}' + route, payload)
 def js(script, args=None): return cmd('POST', '/execute/sync', {'script': script, 'args': args or []})
+def js_async(script, args=None): return cmd('POST', '/execute/async', {'script': script, 'args': args or []})
+
+
+# The same backend commands the interface calls; the Snap check lists updates and changes nothing.
+PREPARE_SNAP_CHECK = "window.__TAURI_INTERNALS__.invoke('prepare_operation', {package: null, action: 'refresh', source: 'snap'})"
 
 
 def wait(script, timeout=60):
@@ -179,8 +186,8 @@ def start_session():
 
 LANGUAGE = os.environ.get('NEXA_LANG', 'en')
 TEXT = {
-    'en': {'updates': 'Updates', 'background': 'Nexa Store keeps going in the background', 'check': 'Check of Snap', 'finished': 'finished'},
-    'it': {'updates': 'Aggiornamenti', 'background': 'Nexa Store continua in background', 'check': 'Controllo Snap', 'finished': 'terminato'},
+    'en': {'background': 'Nexa Store keeps going in the background', 'check': 'Check of Snap', 'finished': 'finished'},
+    'it': {'background': 'Nexa Store continua in background', 'check': 'Controllo Snap', 'finished': 'terminato'},
 }[LANGUAGE]
 env = dict(os.environ, GDK_BACKEND='x11', NEXA_LANG=LANGUAGE)
 watch = NotificationWatch()
@@ -199,14 +206,11 @@ try:
     # ---- 2. With an operation running, the window is hidden and the work finishes in background.
     since_scenario_2 = len(watch.lines)
     start_session()
-    js('[...document.querySelectorAll(".nav-item")].find(b=>b.getAttribute("aria-label")==="' + TEXT['updates'] + '").click()')
-    wait('return !!document.querySelector(".toolbar")', 60)
-    assert js('return [...document.querySelectorAll(".toolbar button")].some(b=>b.textContent.trim()==="Snap")'), 'snapd is not available'
-    js('[...document.querySelectorAll(".toolbar button")].find(b=>b.textContent.trim()==="Snap").click()')
-    wait('return document.querySelector("[data-testid=confirm-operation]")!==null', 60)
+    plan = js_async("const done = arguments[arguments.length - 1]; " + PREPARE_SNAP_CHECK + ".then(done, error => done({error: String(error)}))")
+    assert 'token' in plan, f'snapd is not available: {plan}'
     wid = window_id()
     started = time.monotonic()
-    js('document.querySelector("[data-testid=confirm-operation]").click()')
+    js('window.__TAURI_INTERNALS__.invoke("execute_operation", {token: arguments[0]}); return true', [plan['token']])  # not awaited
     time.sleep(0.15)  # the operation takes about half a second; it is running by now
     close_window(wid)
     time.sleep(0.2)
@@ -228,13 +232,9 @@ try:
     # ---- 3. With the window open and in use the user must be told too: a silent install feels broken.
     start_session()
     mark = len(watch.lines)
-    js('[...document.querySelectorAll(".nav-item")].find(b=>b.getAttribute("aria-label")==="' + TEXT['updates'] + '").click()')
-    wait('return !!document.querySelector(".toolbar")', 60)
-    js('[...document.querySelectorAll(".toolbar button")].find(b=>b.textContent.trim()==="Snap").click()')
-    wait('return document.querySelector("[data-testid=confirm-operation]")!==null', 60)
-    js('document.querySelector("[data-testid=confirm-operation]").click()')
-    wait('return document.querySelector(".activity-card.success, .activity-card.error")!==null', 60)
-    assert js('return !!document.querySelector(".activity-card.success")'), 'Snap check failed'
+    result = js_async("const done = arguments[arguments.length - 1]; " + PREPARE_SNAP_CHECK
+                      + ".then(plan => window.__TAURI_INTERNALS__.invoke('execute_operation', {token: plan.token})).then(done, error => done({error: String(error)}))")
+    assert result.get('success'), f'Snap check failed: {result}'
     time.sleep(1.5)
     open_window = watch.summaries(since=mark)
     note('window open: the end-of-operation notification is still sent', open_window)

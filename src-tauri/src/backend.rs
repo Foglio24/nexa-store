@@ -1,4 +1,5 @@
 //! Ubuntu package operations. All process arguments are explicit; no shell is used.
+use crate::packagekit;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -1037,7 +1038,28 @@ fn check_removals(effects: &AptEffects, target: &str, action: &str) -> Result<()
 enum Proof { Apt { simulation: Invocation, effects: AptEffects, target: String, action: String },
     Flatpak { checks: Vec<(Invocation,String)>, remotes: Vec<Remote> }, Snap {action:String,approved:SnapApproval},
     /// AppImage operations run inside the app (a verified download), not as an external command.
-    Appimage(Box<crate::appimage::Prepared>), None }
+    Appimage(Box<crate::appimage::Prepared>),
+    /// "Check for updates": refresh the lists of every source, one after the other.
+    Check(Vec<CheckStep>), None }
+/// How one source's part of an update check is carried out.
+enum StepRun {
+    Command(Invocation),
+    /// Refresh the APT lists through PackageKit, which the system lets a person at the computer do
+    /// without a password. `fallback` is the administrator route, used only if PackageKit is not
+    /// there or refuses.
+    PackageKit { fallback: Invocation },
+}
+/// One source's part of an update check: how it runs and the proof it was approved against.
+struct CheckStep { name: &'static str, run: StepRun, proof: Proof }
+impl CheckStep {
+    /// What the confirmation shows as the "command" of this step.
+    fn display(&self) -> String {
+        match &self.run {
+            StepRun::Command(invocation) => invocation.display(),
+            StepRun::PackageKit { .. } => "D-Bus org.freedesktop.PackageKit: CreateTransaction, then Transaction.RefreshCache(force=true)".into(),
+        }
+    }
+}
 /// What a confirmed plan does, in the words the notifications use.
 #[derive(Debug, Clone)]
 pub struct OperationInfo { pub action: String, pub label: String, pub source: String }
@@ -1175,10 +1197,52 @@ fn appimage_plan(package: Option<Package>, action: &str) -> Result<(Invocation, 
     Ok((Invocation::new("nexa-store", &["appimage", action]), Proof::Appimage(Box::new(prepared)), details, false))
 }
 
+/// Remember a plan under a fresh single-use token and describe it for the confirmation dialog.
+fn store_plan(invocation: Invocation, proof: Proof, info: OperationInfo, title: String, details: Vec<String>, requires_admin: bool) -> Result<Plan> {
+    let mut bytes = [0u8;32];
+    getrandom::getrandom(&mut bytes).map_err(|e| tr!("Cannot generate a secure token: {}", e))?;
+    let token = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let command = match &proof {
+        Proof::Appimage(prepared) => prepared.describe(),
+        Proof::Check(steps) => steps.iter().map(CheckStep::display).collect::<Vec<_>>().join("\n"),
+        _ => invocation.display(),
+    };
+    let mut plans = PLANS.get_or_init(|| Mutex::new(HashMap::new())).lock().map_err(|_|tr!("Plan store not available."))?;
+    plans.retain(|_,p| p.created.elapsed() < PLAN_TTL);
+    if plans.len() >= 20 { plans.clear(); }
+    plans.insert(token.clone(),Pending {created:Instant::now(),invocation,proof,info});
+    Ok(Plan {token,title,summary:if requires_admin {tr!("Needs your confirmation and administrator authentication when the system asks for it.")}
+        else {tr!("Needs your confirmation before changing the system.")},command,details,requires_admin})
+}
+
+/// The single "check for updates" plan: refresh the APT lists, the Flatpak catalogue and the Snap list.
+/// A source that cannot be refreshed (not installed, no remote…) is skipped and said so; the others go on.
+fn check_plan() -> Result<Plan> {
+    let mut details = vec![tr!("Checks all your sources in one go: it refreshes the APT package lists, the Flatpak catalog and the Snap list, then shows what can be updated. Nothing is installed or upgraded.")];
+    let mut steps = Vec::new();
+    let mut requires_admin = false;
+    for (name, plan) in [("APT", apt_plan(None,"refresh")), ("Flatpak", flatpak_plan(None,"refresh")), ("Snap", snap_plan(None,"refresh"))] {
+        match plan {
+            // The APT lists go through PackageKit when the system has it: no password, like the Software Updater.
+            Ok((invocation, proof, _, _)) if name == "APT" && packagekit::available() => {
+                details.push(tr!("Refreshes the APT package lists through PackageKit, the service the Ubuntu Software Updater uses. Your session is allowed to do this without a password; if PackageKit refuses, Ubuntu asks for your password and the standard apt-get update is used instead."));
+                steps.push(CheckStep { name, run: StepRun::PackageKit { fallback: invocation }, proof });
+            },
+            Ok((invocation, proof, lines, admin)) => { requires_admin |= admin; details.extend(lines); steps.push(CheckStep { name, run: StepRun::Command(invocation), proof }); },
+            Err(error) => details.push(tr!("{} is skipped: {}", name, error)),
+        }
+    }
+    if steps.is_empty() { return Err(tr!("There is no source to check.")); }
+    details.push(tr!("The confirmation is valid for 2 minutes and a single run."));
+    let info = OperationInfo { action: "check".into(), label: String::new(), source: "all".into() };
+    store_plan(Invocation::new("nexa-store", &["check"]), Proof::Check(steps), info, tr!("Check for updates"), details, requires_admin)
+}
+
 pub fn prepare_operation(package: Option<Package>, action: String, source: Option<String>) -> Result<Plan> {
     ensure_ubuntu()?;
     if MUTATING.load(Ordering::Acquire) { return Err(tr!("Another operation is in progress. Wait for it to finish.")); }
     if !matches!(action.as_str(),"install"|"remove"|"update"|"refresh") { return Err(tr!("Invalid action.")); }
+    if action == "refresh" && package.is_none() && source.as_deref() == Some("all") { return check_plan(); }
     let selected_source = match (&package,source.as_deref()) {
         (Some(p),None) => p.source,
         (Some(p),Some("apt")) if p.source == Source::Apt => Source::Apt,
@@ -1197,17 +1261,76 @@ pub fn prepare_operation(package: Option<Package>, action: String, source: Optio
         Source::Apt => apt_plan(package,&action)?, Source::Flatpak => flatpak_plan(package,&action)?, Source::Snap => snap_plan(package,&action)?,
         Source::Appimage => appimage_plan(package,&action)?,
     };
-    let mut bytes = [0u8;32];
-    getrandom::getrandom(&mut bytes).map_err(|e| tr!("Cannot generate a secure token: {}", e))?;
-    let token = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
-    let command = match &proof { Proof::Appimage(prepared) => prepared.describe(), _ => invocation.display() };
-    let mut plans = PLANS.get_or_init(|| Mutex::new(HashMap::new())).lock().map_err(|_|tr!("Plan store not available."))?;
-    plans.retain(|_,p| p.created.elapsed() < PLAN_TTL);
-    if plans.len() >= 20 { plans.clear(); }
-    plans.insert(token.clone(),Pending {created:Instant::now(),invocation,proof,info:OperationInfo {action:action.clone(),label:label.clone(),source:match selected_source {Source::Apt=>"apt",Source::Flatpak=>"flatpak",Source::Snap=>"snap",Source::Appimage=>"appimage"}.into()}});
     let verb = match action.as_str() {"install"=>tr!("Install"),"remove"=>tr!("Remove"),"update"=>tr!("Update"),_=>tr!("Refresh indexes")};
-    Ok(Plan {token,title:format!("{verb} {label}"),summary:if requires_admin {tr!("Needs your confirmation and administrator authentication when the system asks for it.")}
-        else {tr!("Needs your confirmation before changing the system.")},command,details,requires_admin})
+    let info = OperationInfo {action:action.clone(),label:label.clone(),source:match selected_source {Source::Apt=>"apt",Source::Flatpak=>"flatpak",Source::Snap=>"snap",Source::Appimage=>"appimage"}.into()};
+    store_plan(invocation, proof, info, format!("{verb} {label}"), details, requires_admin)
+}
+
+/// Check, right before running, that what the user approved is still what would happen.
+fn verify_proof(proof: &Proof) -> Result<()> {
+    match proof {
+        Proof::Apt {simulation,effects,target,action} => {
+            let current = apt_effects(&run_checked(simulation)?)?;
+            check_removals(&current,target,action)?;
+            if &current != effects { return Err(tr!("The APT state has changed. Review a new plan before proceeding.")); }
+        },
+        Proof::Flatpak {checks,remotes:approved_remotes} => {
+            if &remotes()? != approved_remotes { return Err(tr!("Flatpak remotes have changed (scope, URL or GPG verification). Prepare a new plan.")); }
+            for (inv,expected) in checks {
+                if run_checked(inv)?.trim() != expected { return Err(tr!("The Flatpak metadata or state has changed. Prepare a new plan.")); }
+            }
+        },
+        Proof::Snap {action,approved} => {
+            if &snap_approval(&approved.name,action,&approved.channel)? != approved {
+                return Err(tr!("The Snap identity, channel or revision has changed. Prepare a new plan before proceeding."));
+            }
+        },
+        // These two are verified and run by their own code.
+        Proof::Appimage(_) | Proof::Check(_) | Proof::None => {},
+    }
+    Ok(())
+}
+
+fn finished_text(result: &Captured) -> String {
+    if result.text.trim().is_empty() {
+        if result.success {tr!("Operation completed.")} else {tr!("Operation cancelled or failed. The package manager returned no details.")}
+    } else { result.text.clone() }
+}
+
+/// Run the steps of an update check one after the other. A step that fails (for example the password
+/// prompt was cancelled) does not stop the others; the result says what happened to each.
+fn run_check(steps: &[CheckStep]) -> Result<OperationResult> { run_check_with(steps, &packagekit::refresh_lists) }
+
+/// Carry out one step: its command, or the PackageKit refresh with the administrator route as fallback.
+fn run_step(step: &CheckStep, refresh_with_packagekit: &dyn Fn() -> packagekit::Outcome) -> Result<(bool, String)> {
+    verify_proof(&step.proof)?;
+    match &step.run {
+        StepRun::Command(invocation) => { let captured = run(invocation, MUTATION_TIMEOUT, true)?; Ok((captured.success, finished_text(&captured))) },
+        StepRun::PackageKit { fallback } => match refresh_with_packagekit() {
+            packagekit::Outcome::Done => Ok((true, tr!("The APT package lists were refreshed through PackageKit."))),
+            // PackageKit worked and the refresh failed (no network…): asking for a password would not help.
+            packagekit::Outcome::Failed(text) => Ok((false, text)),
+            packagekit::Outcome::Refused(reason) => {
+                let captured = run(fallback, MUTATION_TIMEOUT, true)?;
+                Ok((captured.success, format!("{}\n{}", tr!("PackageKit could not do it ({}); asking for administrator authentication instead.", reason.trim()), finished_text(&captured))))
+            },
+        },
+    }
+}
+
+fn run_check_with(steps: &[CheckStep], refresh_with_packagekit: &dyn Fn() -> packagekit::Outcome) -> Result<OperationResult> {
+    let (mut success, mut sections) = (true, Vec::new());
+    for step in steps {
+        let outcome = run_step(step, refresh_with_packagekit);
+        // A process that could not be stopped keeps the gate closed: report that and run nothing else.
+        if let Err(error) = &outcome { if PROCESS_HELD.load(Ordering::Acquire) { return Err(error.clone()); } }
+        let (done, text) = match outcome { Ok(result) => result, Err(error) => (false, error) };
+        success &= done;
+        sections.push(format!("== {} ==\n{}", if done { tr!("{}: done", step.name) } else { tr!("{}: failed", step.name) }, text.trim()));
+    }
+    // The AppImage release lookups are remembered for a few minutes; an update check must look afresh.
+    crate::appimage::forget_releases();
+    Ok(OperationResult { success, output: sections.join("\n\n") })
 }
 
 pub fn execute_operation(token: String) -> Result<OperationResult> {
@@ -1224,32 +1347,15 @@ pub fn execute_operation(token: String) -> Result<OperationResult> {
         if plan.created.elapsed() >= PLAN_TTL { return Err(tr!("The plan has expired. Reopen the confirmation to generate a new one.")); }
         if let Ok(mut current) = CURRENT.lock() { *current = Some(plan.info.clone()); }
         match &plan.proof {
-            Proof::Apt {simulation,effects,target,action} => {
-                let current = apt_effects(&run_checked(simulation)?)?;
-                check_removals(&current,target,action)?;
-                if &current != effects { return Err(tr!("The APT state has changed. Review a new plan before proceeding.")); }
-            },
-            Proof::Flatpak {checks,remotes:approved_remotes} => {
-                if &remotes()? != approved_remotes { return Err(tr!("Flatpak remotes have changed (scope, URL or GPG verification). Prepare a new plan.")); }
-                for (inv,expected) in checks {
-                    if run_checked(inv)?.trim() != expected { return Err(tr!("The Flatpak metadata or state has changed. Prepare a new plan.")); }
-                }
-            },
-            Proof::Snap {action,approved} => {
-                if &snap_approval(&approved.name,action,&approved.channel)? != approved {
-                    return Err(tr!("The Snap identity, channel or revision has changed. Prepare a new plan before proceeding."));
-                }
-            },
             Proof::Appimage(prepared) => {
                 let (success, output) = crate::appimage::execute(prepared);
                 return Ok(OperationResult {success, output});
             },
-            Proof::None => {},
+            Proof::Check(steps) => return run_check(steps),
+            proof => verify_proof(proof)?,
         }
         let result = run(&plan.invocation,MUTATION_TIMEOUT,true)?;
-        Ok(OperationResult {success:result.success,output:if result.text.trim().is_empty() {
-            if result.success {tr!("Operation completed.")} else {tr!("Operation cancelled or failed. The package manager returned no details.")}
-        } else {result.text}})
+        Ok(OperationResult {success:result.success,output:finished_text(&result)})
     })();
     // In the exceptionally rare unkillable-process case, the monitor in run()
     // owns this gate until actual process termination.
@@ -1378,8 +1484,11 @@ mod tests {
         // The child writes to a file, so an output that nobody reads cannot stop it with SIGPIPE.
         let long=run(&Invocation::new("/bin/sh",&["-c","i=0; while [ $i -lt 20000 ]; do echo line $i; i=$((i+1)); done; echo done"]),Duration::from_secs(20),true).unwrap();
         assert!(long.success && long.text.trim_end().ends_with("done"));
-        let leftovers=fs::read_dir(std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|p|p.is_dir()).unwrap_or_else(std::env::temp_dir)).unwrap()
+        // Other tests of this process run commands too, and their files exist for a moment: wait for those.
+        let count_leftovers=||fs::read_dir(std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).filter(|p|p.is_dir()).unwrap_or_else(std::env::temp_dir)).unwrap()
             .filter_map(|e|e.ok()).filter(|e|e.file_name().to_string_lossy().starts_with(&format!("nexa-store-{}-",std::process::id()))).count();
+        let mut leftovers=count_leftovers();
+        for _ in 0..100 { if leftovers == 0 { break; } thread::sleep(Duration::from_millis(50)); leftovers=count_leftovers(); }
         assert_eq!(leftovers,0,"temporary output files are always deleted");
         assert!(run(&Invocation::new("/nonexistent/program",&[]),Duration::from_secs(5),true).is_err());
     }
@@ -1400,6 +1509,60 @@ mod tests {
         assert!(operation_info("0".repeat(64).as_str()).is_none());
         PLANS.get().unwrap().lock().unwrap().remove(&token);
     }
+    fn step(name: &'static str, script: &str) -> CheckStep { CheckStep { name, run: StepRun::Command(Invocation::new("/bin/sh", &["-c", script])), proof: Proof::None } }
+
+    #[test]
+    fn an_update_check_runs_every_step_and_reports_each_one() {
+        let done = run_check(&[step("APT", "echo lists refreshed"), step("Snap", "echo all snaps up to date")]).unwrap();
+        assert!(done.success);
+        assert!(done.output.contains("== APT: done ==\nlists refreshed") && done.output.contains("== Snap: done ==\nall snaps up to date"), "{}", done.output);
+        // The password prompt was cancelled: APT fails, the other sources are still checked.
+        let partial = run_check(&[step("APT", "echo Error executing command as another user: Not authorized; exit 126"), step("Flatpak", "echo metadata updated"), step("Snap", "exit 1")]).unwrap();
+        assert!(!partial.success, "one failed step makes the check incomplete");
+        assert!(partial.output.contains("== APT: failed ==\nError executing command") && partial.output.contains("== Flatpak: done ==\nmetadata updated") && partial.output.contains("== Snap: failed =="), "{}", partial.output);
+        assert!(partial.output.contains("Operation cancelled or failed"), "a step with no output still says something: {}", partial.output);
+        let missing = run_check(&[CheckStep { name: "APT", run: StepRun::Command(Invocation::new("/nonexistent/program", &[])), proof: Proof::None }, step("Snap", "echo ok")]).unwrap();
+        assert!(!missing.success && missing.output.contains("Cannot start") && missing.output.contains("== Snap: done =="), "{}", missing.output);
+    }
+
+    fn packagekit_step(marker: &std::path::Path) -> CheckStep {
+        let fallback = Invocation::new("/bin/sh", &["-c", &format!("touch {}; echo apt-get update done", marker.display())]);
+        CheckStep { name: "APT", run: StepRun::PackageKit { fallback }, proof: Proof::None }
+    }
+
+    #[test]
+    fn the_apt_lists_go_through_packagekit_and_the_password_route_is_only_a_fallback() {
+        let marker = std::env::temp_dir().join(format!("nexa-fallback-{}-{}", std::process::id(), line!()));
+        let _ = fs::remove_file(&marker);
+        // PackageKit does it: no command runs.
+        let done = run_check_with(&[packagekit_step(&marker)], &|| packagekit::Outcome::Done).unwrap();
+        assert!(done.success && done.output.contains("== APT: done ==") && done.output.contains("through PackageKit"), "{}", done.output);
+        assert!(!marker.exists(), "the administrator route must not run when PackageKit worked");
+        // PackageKit tried and the refresh failed (no network): reported as it is, no password prompt.
+        let failed = run_check_with(&[packagekit_step(&marker), step("Snap", "echo fine")], &|| packagekit::Outcome::Failed("Temporary failure resolving".into())).unwrap();
+        assert!(!failed.success && failed.output.contains("== APT: failed ==\nTemporary failure resolving") && failed.output.contains("== Snap: done =="), "{}", failed.output);
+        assert!(!marker.exists(), "a genuine failure is not retried with a password");
+        // PackageKit missing or refusing: the standard route takes over, and says so.
+        let refused = run_check_with(&[packagekit_step(&marker)], &|| packagekit::Outcome::Refused("Not authorized".into())).unwrap();
+        assert!(refused.success && marker.exists(), "{}", refused.output);
+        assert!(refused.output.contains("PackageKit could not do it (Not authorized)") && refused.output.contains("apt-get update done"), "{}", refused.output);
+        let _ = fs::remove_file(&marker);
+    }
+
+    #[test]
+    fn an_update_check_plan_shows_every_command_and_only_needs_the_password_for_apt() {
+        let steps = vec![
+            CheckStep { name: "APT", run: StepRun::PackageKit { fallback: Invocation::new("/usr/bin/pkexec", &["/usr/bin/apt-get", "update"]) }, proof: Proof::None },
+            CheckStep { name: "Snap", run: StepRun::Command(Invocation::new("/usr/bin/snap", &["refresh", "--list"])), proof: Proof::None },
+        ];
+        let info = OperationInfo { action: "check".into(), label: String::new(), source: "all".into() };
+        let plan = store_plan(Invocation::new("nexa-store", &["check"]), Proof::Check(steps), info, "Check for updates".into(), vec![], false).unwrap();
+        assert_eq!(plan.command, "D-Bus org.freedesktop.PackageKit: CreateTransaction, then Transaction.RefreshCache(force=true)\n/usr/bin/snap refresh --list");
+        assert!(!plan.requires_admin, "through PackageKit no password is needed");
+        assert_eq!(operation_info(&plan.token).unwrap().action, "check");
+        PLANS.get().unwrap().lock().unwrap().remove(&plan.token);
+    }
+
     #[test]
     fn identifiers_reject_options_shell_and_version_expressions() {
         for bad in ["", "-bash", "bash;id", "foo bar", "foo\nbar", "bash=1", "bash/stable", "x", "pkg:amd64:extra", "foo$(id)"] { assert!(apt_id(bad).is_err(),"{bad}"); }

@@ -8,7 +8,8 @@ export interface StoreActions {
   busy: boolean;
   openGroup: (group: AppGroup) => void;
   openPackage: (pkg: StorePackage) => void;
-  prepare: (action: Action, pkg?: StorePackage, source?: PackageSource) => void;
+  /** `source` is `'all'` only for the update check, which refreshes every source at once. */
+  prepare: (action: Action, pkg?: StorePackage, source?: PackageSource | 'all') => void;
   /** Start an installed app. */
   open: (pkg: StorePackage) => void;
   openCategory: (id: CategoryId) => void;

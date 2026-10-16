@@ -1,18 +1,19 @@
 import { ArrowRight, Check, ChevronRight, Info, ShieldCheck, Terminal } from 'lucide-react';
-import type { Action, PackageSource, Plan } from '../types';
+import type { Action, Plan, SourceFilter } from '../types';
 import { useT } from '../i18n';
 import Modal from './Modal';
 import SourceBadge from './SourceBadge';
 
 /** Summary of exactly what will happen; nothing runs until the user confirms here. */
 export default function ConfirmModal({ plan, action, source, running, onCancel, onConfirm }: {
-  plan: Plan; action: Action; source?: PackageSource; running: boolean; onCancel: () => void; onConfirm: () => void;
+  plan: Plan; action: Action; source?: SourceFilter; running: boolean; onCancel: () => void; onConfirm: () => void;
 }) {
   const t = useT();
   const technical = plan.details.filter(detail => detail.includes('\n') || detail.length > 500);
   const summary = plan.details.filter(detail => !detail.includes('\n') && detail.length <= 500);
   const destructive = action === 'remove';
-  const confirmLabel = action === 'refresh' && source === 'snap' ? t('Check')
+  const confirmLabel = action === 'refresh' && source === 'all' ? t('Check for updates')
+    : action === 'refresh' && source === 'snap' ? t('Check')
     : action === 'install' ? t('Install and confirm')
     : action === 'remove' ? t('Remove and confirm')
     : action === 'update' ? t('Update and confirm')
@@ -22,7 +23,7 @@ export default function ConfirmModal({ plan, action, source, running, onCancel, 
       <span className={`confirm-icon ${destructive ? 'danger' : ''}`}><ShieldCheck size={26} /></span>
       <div>
         <h2 className="confirm-title">{plan.title}</h2>
-        {source && <SourceBadge source={source} />}
+        {source && source !== 'all' && <SourceBadge source={source} />}
       </div>
     </div>
     <p className="confirm-summary">{plan.summary}</p>

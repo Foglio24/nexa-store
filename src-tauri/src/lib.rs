@@ -7,6 +7,7 @@ pub mod backend;
 pub mod catalog;
 pub mod categories;
 pub mod notify;
+pub mod packagekit;
 pub mod popular;
 pub mod store;
 
@@ -78,6 +79,11 @@ async fn finish_operation(app: &tauri::AppHandle, info: &backend::OperationInfo,
     let next = after_operation(hidden, success);
     if next.notify {
         let (summary, mut body) = notify::finished_message(&info.action, &info.label, success);
+        if success && info.action == "check" {
+            // Say what the check found, not just that it ended.
+            let found = blocking(|| Ok(backend::list_updates("all".into()).ok().map(|updates| updates.len()))).await.ok().flatten();
+            body = notify::updates_found_message(found);
+        }
         if success && info.action == "install" && info.source == "flatpak" && backend::flatpak_menu_hidden() {
             body = format!("{body} {}", notify::menu_hint());
         }

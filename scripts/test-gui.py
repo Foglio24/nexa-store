@@ -2,8 +2,7 @@
 """UI check of Nexa Store on the real window.
 
 It installs, removes and updates nothing: it searches, browses categories, opens details and
-confirmations (then cancels them) and only runs `snap refresh --list`, which lists updates without
-applying them. Needs the release binary, tauri-driver, WebKitWebDriver and a graphical session.
+confirmations (then cancels them) and never runs an operation (NEXA_RUN_CHECK=1 also runs the update check). Needs the release binary, tauri-driver, WebKitWebDriver and a graphical session.
 Usage: python3 scripts/test-gui.py   (NEXA_TAURI_DRIVER=/path/to/tauri-driver if it is not in PATH)
 
 The interface follows the system language, so the script fixes it: English unless NEXA_LANG=it is set
@@ -91,9 +90,9 @@ def modal_open(): return js('return !!document.querySelector("[role=dialog]")')
 LANGUAGE = os.environ.get('NEXA_LANG', 'en')
 L = {
     'en': dict(clear='Clear search', more='Show more apps', games='Games', source='Source', all='All', kind='Type', packages='Packages', everything='Everything',
-               install='Install', cancel='Cancel', installed='Installed', updates='Updates', remove='Remove', open='Open ', utilities='Utilities', explore='Explore'),
+               install='Install', cancel='Cancel', installed='Installed', updates='Updates', remove='Remove', open='Open ', utilities='Utilities', explore='Explore', check='Check for updates', operations='Operations', done='done'),
     'it': dict(clear='Cancella ricerca', more='Mostra altre app', games='Giochi', source='Sorgente', all='Tutte', kind='Tipo', packages='Pacchetti', everything='Tutto',
-               install='Installa', cancel='Annulla', installed='Installate', updates='Aggiornamenti', remove='Rimuovi', open='Apri ', utilities='Utilità', explore='Esplora'),
+               install='Installa', cancel='Annulla', installed='Installate', updates='Aggiornamenti', remove='Rimuovi', open='Apri ', utilities='Utilità', explore='Esplora', check='Controlla aggiornamenti', operations='Operazioni', done='fatto'),
 }[LANGUAGE]
 env = dict(os.environ, GDK_BACKEND='x11', NEXA_LANG=LANGUAGE)
 drv = subprocess.Popen([DRIVER, '--port', str(PORT), '--native-port', str(PORT + 1)], env=env,
@@ -260,20 +259,42 @@ try:
     note('installed: Open button', {'apps_with_open': len(opens), 'examples': opens[:3]})
     shot('16-installed.png')
 
-    # ---- Updates: the read-only Snap check, all the way to the Operations page
+    # ---- Updates: one button checks every source. Its confirmation is opened and cancelled: the APT part
+    # would ask for the administrator password, so this script never runs it.
     js('[...document.querySelectorAll(".nav-item")].find(b=>b.getAttribute("aria-label")==="' + L['updates'] + '").click()')
     wait('return !!document.querySelector(".toolbar")', 60)
+    buttons = js('return [...document.querySelectorAll(".toolbar button")].map(b=>b.textContent.trim())')
+    assert buttons == [L['check']], f'the Updates page must offer one check button, found {buttons}'
     shot('17-updates.png')
-    if js('return [...document.querySelectorAll(".toolbar button")].some(b=>b.textContent.trim()==="Snap")'):
-        click_text('Snap', 'document.querySelector(".toolbar")')
-        wait('return document.querySelector("[data-testid=confirm-operation]")!==null', 60)
-        command = js('return document.querySelector(".command-preview pre").textContent')
-        assert 'snap refresh --list' in command and 'pkexec' not in command, command
+    click_text(L['check'], 'document.querySelector(".toolbar")')
+    wait('return document.querySelector("[data-testid=confirm-operation]")!==null', 60)
+    plan = js('return {title:document.querySelector(".confirm-title").textContent, badge:!!document.querySelector(".confirm-head .source-badge"), command:document.querySelector(".command-preview pre").textContent, button:document.querySelector("[data-testid=confirm-operation]").textContent, details:[...document.querySelectorAll(".plan-details li")].length}')
+    lines = plan['command'].splitlines()
+    assert plan['title'] == L['check'] and not plan['badge'] and plan['button'] == L['check'], plan
+    # The APT lists are refreshed through PackageKit (no password) when the system has it, else with pkexec.
+    assert any('PackageKit' in line and 'RefreshCache' in line for line in lines) or any('apt-get' in line and 'update' in line and 'pkexec' in line for line in lines), lines
+    assert any('snap refresh --list' in line for line in lines), lines
+    assert not any(word in plan['command'] for word in ('upgrade', 'install', 'remove', 'autoremove')), lines
+    note('update check confirmation', {'commands': lines, 'details': plan['details']})
+    shot('18-update-check.png')
+    if not os.environ.get('NEXA_RUN_CHECK'):
+        click_text(L['cancel'])
+        assert not modal_open()
+    else:
+        # Optional: really run the check. It refreshes the APT lists through PackageKit, the Flatpak catalog
+        # and the Snap list; nothing is installed. If PackageKit is missing or refuses, Ubuntu asks for the
+        # administrator password and this waits for it.
         js('document.querySelector("[data-testid=confirm-operation]").click()')
-        wait('return document.querySelector(".activity-card.success, .activity-card.error")!==null', 120)
-        assert js('return !!document.querySelector(".activity-card.success")'), 'Snap check failed'
-        note('Snap update check executed (read-only)', {'command': command, 'output': js('return document.querySelector(".activity-card pre").textContent')[:160]})
-        shot('18-operations.png')
+        # While it runs the window shows Operations; a successful check then returns to Updates.
+        wait('return document.querySelector(".nav-item.active")?.getAttribute("aria-label")===arguments[0]'.replace('arguments[0]', json.dumps(L['updates'])) + ' && !!document.querySelector(".toolbar")', 300)
+        note('update check executed: back on the Updates page', {'notice': js('return document.querySelector(".alert-success")?.textContent')})
+        shot('19-after-check.png')
+        js('[...document.querySelectorAll(".nav-item")].find(b=>b.getAttribute("aria-label")===arguments[0]).click()', [L['operations']])
+        wait('return !!document.querySelector(".activity-card")', 30)
+        output = js('return document.querySelector(".activity-card pre").textContent')
+        assert js('return !!document.querySelector(".activity-card.success")'), output
+        assert all(f'== {name}: {L["done"]} ==' in output for name in ('APT', 'Flatpak', 'Snap')), output
+        note('update check output', {'output': output[:500]})
     ok = True
 finally:
     try:
