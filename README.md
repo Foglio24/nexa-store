@@ -58,7 +58,7 @@ Download the `.deb` from the [latest release](../../releases/latest) and install
 sudo apt install ./nexa-store_0.7.0_amd64.deb
 ```
 
-A `.deb` built on a recent release can need newer libraries (glibc, WebKitGTK) than an older release provides: if APT reports unmet dependencies, [build from source](#build-from-source) on that system — it takes a few minutes and produces a package for exactly that release. The SHA-256 checksum is in `SHA256SUMS.txt` next to the package.
+The released package is built for **amd64** and needs **glibc 2.39 or later**: Ubuntu 24.04 and later, Debian 13 and later, Linux Mint 22, Pop!_OS 24.04, AnduinOS 2 and other derivatives on those bases. On older releases (Debian 12, Ubuntu 22.04, Linux Mint 21…), or if APT reports unmet dependencies, [build from source](#build-from-source) on that system — it takes a few minutes and produces a package for exactly that release. The SHA-256 checksum is in `SHA256SUMS.txt` next to the package.
 
 ## Requirements
 
