@@ -36,7 +36,7 @@ export default function ConfirmModal({ plan, action, source, running, onCancel, 
       </div>
     </details>
     <div className="confirm-note"><Info size={17} /><p>{plan.requiresAdmin
-      ? t('Ubuntu may ask for your password in a separate window. Nexa Store does not see it and does not keep it.')
+      ? t('The system may ask for your password in a separate window. Nexa Store does not see it and does not keep it.')
       : t('The operation starts only after you confirm. You can cancel now without changing anything.')}{' '}
       {t('Once started you can close the window: the operation goes on and you get a notification when it ends.')}</p></div>
     <div className="modal-actions">

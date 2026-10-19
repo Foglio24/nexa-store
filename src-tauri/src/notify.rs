@@ -106,7 +106,7 @@ fn identity(delivery: Delivery) -> (&'static str, Option<String>) {
 
 /// Show a notification. Returns whether some notification service accepted it; a missing service
 /// (for example in a bare session) is not an error for the operation itself. The standard D-Bus
-/// route is tried first, then the `notify-send` tool, which Ubuntu ships with its desktop.
+/// route is tried first, then the `notify-send` tool (package libnotify-bin, part of most desktops).
 pub fn send(summary: &str, body: &str, delivery: Delivery) -> bool {
     let (name, entry) = identity(delivery);
     let mut notification = Notification::new();

@@ -282,7 +282,7 @@ try:
         assert not modal_open()
     else:
         # Optional: really run the check. It refreshes the APT lists through PackageKit, the Flatpak catalog
-        # and the Snap list; nothing is installed. If PackageKit is missing or refuses, Ubuntu asks for the
+        # and the Snap list; nothing is installed. If PackageKit is missing or refuses, the system asks for the
         # administrator password and this waits for it.
         js('document.querySelector("[data-testid=confirm-operation]").click()')
         # While it runs the window shows Operations; a successful check then returns to Updates.

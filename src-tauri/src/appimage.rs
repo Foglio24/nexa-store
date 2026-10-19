@@ -587,8 +587,9 @@ impl Prepared {
 
 fn mebibytes(bytes: u64) -> String { format!("{:.1}", bytes as f64 / 1_048_576.0) }
 
-const FUSE_LIBRARIES: [&str; 5] = [
+const FUSE_LIBRARIES: [&str; 8] = [
     "/usr/lib/x86_64-linux-gnu/libfuse.so.2", "/lib/x86_64-linux-gnu/libfuse.so.2", "/usr/lib/aarch64-linux-gnu/libfuse.so.2",
+    "/lib/aarch64-linux-gnu/libfuse.so.2", "/usr/lib/arm-linux-gnueabihf/libfuse.so.2", "/usr/lib/i386-linux-gnu/libfuse.so.2",
     "/usr/lib64/libfuse.so.2", "/usr/lib/libfuse.so.2",
 ];
 /// AppImages mount themselves with FUSE 2. Without it they still run, by unpacking first.

@@ -441,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires Ubuntu AppStream data; Flatpak and Snap sources are used when present"]
+    #[ignore = "requires APT AppStream data; Flatpak and Snap sources are used when present"]
     fn real_home_and_categories() {
         let started = Instant::now();
         let home = explore_home(1).unwrap();

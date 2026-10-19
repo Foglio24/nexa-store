@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.0 — 2026-10-19
+
+Every Debian or Ubuntu based distribution, not only Ubuntu.
+
+- **Debian, Ubuntu and their derivatives are supported.** The system check reads `ID` and `ID_LIKE` from `/etc/os-release` instead of requiring `ID=ubuntu`, so Debian, Linux Mint, Pop!_OS, Zorin OS, elementary OS, MX Linux, Kali, Raspberry Pi OS, AnduinOS and the others work; a derivative that does not declare its family is accepted when dpkg and APT manage it. Before, all of them showed "Unsupported system: Ubuntu is required." and every operation was refused.
+- **APT catalog on older releases.** The AppStream metadata is also read from `/var/lib/app-info`, where Debian 12, Ubuntu 22.04 and Linux Mint 21 keep it (AppStream 1.0 moved it to `/var/lib/swcatalog`). Each real folder is read once when one links to the other.
+- **System Flatpak remotes.** Many derivatives configure Flathub for the whole system and no user remote. New installs now go to the scope of the remote that offers the app (system-wide from a system remote, per user from a user one) instead of requiring a user remote, and "Check for updates" refreshes the catalog of system remotes too. System-wide changes no longer pass `--noninteractive`, so Flatpak can ask polkit for a password when its policy needs one. The warning appears only when no remote is configured at all.
+- **No Snap warning on systems without Snap.** Linux Mint, AnduinOS, Debian and others leave Snap out on purpose: the source is just off. The warning stays for a `snap` command whose snapd does not answer.
+- Removal protection covers the desktop and system meta-packages of the derivatives too (Debian tasks, Linux Mint, Pop!_OS, Zorin OS, elementary OS, Kali, Raspberry Pi OS, the Ubuntu flavours, display managers and desktop shells).
+- The Debian package depends on `pkexec | policykit-1` and recommends `libfuse2t64 | libfuse2`, `flatpak`, `packagekit` and `libnotify-bin`, so it installs on older releases as well.
+- `scripts/setup.sh` (formerly `setup-ubuntu.sh`, which still works) recognises every Debian or Ubuntu based system, picks the package names of that release and uses the distribution's Rust and Node.js only when they are recent enough.
+- Messages that named Ubuntu now speak of "the system"; the README has a "Supported distributions" section.
+
 ## 0.6.1 — 2026-10-16
 
 One button to check for updates.

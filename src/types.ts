@@ -27,7 +27,7 @@ export interface StorePackage {
   categories?: string[];
 }
 export interface SystemInfo {
-  ubuntu: boolean;
+  supported: boolean;
   osName: string;
   aptAvailable: boolean;
   flatpakAvailable: boolean;

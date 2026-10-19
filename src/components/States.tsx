@@ -13,5 +13,5 @@ export function ErrorState({ message, onRetry }: { message: string; onRetry?: ()
 
 export function DesktopOnly() {
   const t = useT();
-  return <EmptyState icon={<Monitor size={34} strokeWidth={1.5} />} title={t('The catalog lives in the desktop app.')}>{t("Open Nexa Store on Ubuntu to read your computer's sources.")}</EmptyState>;
+  return <EmptyState icon={<Monitor size={34} strokeWidth={1.5} />} title={t('The catalog lives in the desktop app.')}>{t("Open Nexa Store on Debian, Ubuntu or a distribution based on them to read your computer's sources.")}</EmptyState>;
 }

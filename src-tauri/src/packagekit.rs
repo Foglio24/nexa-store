@@ -1,6 +1,7 @@
 //! Refresh the APT package lists through PackageKit.
 //!
-//! PackageKit is the service the Ubuntu Software Updater uses. Its polkit rule for refreshing the
+//! PackageKit is the service the software updaters of Ubuntu, Debian and their derivatives use (Ubuntu
+//! Software Updater, GNOME Software, KDE Discover). Its polkit rule for refreshing the
 //! lists (`org.freedesktop.packagekit.system-sources-refresh`) lets a person who is using the
 //! computer do it without a password, which is why the Software Updater never asks for one just to
 //! look for updates. `pkexec apt-get update`, in contrast, always asks. Nothing here installs,
@@ -112,7 +113,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "talks to the real PackageKit and refreshes the APT lists (the same refresh Ubuntu's Software Updater does)"]
+    #[ignore = "talks to the real PackageKit and refreshes the APT lists (the same refresh the system's software updater does)"]
     fn real_refresh_needs_no_password() {
         assert!(available(), "PackageKit is not available");
         let started = std::time::Instant::now();

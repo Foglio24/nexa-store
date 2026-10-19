@@ -2,7 +2,7 @@
 
 # Nexa Store
 
-A desktop app store for Ubuntu: **search, discover and manage software from APT, Flatpak, Snap and AppImage** in one interface, with a confirmation before every change. Built with **Tauri 2, React, TypeScript and Rust**. Light and dark themes follow the system.
+A desktop app store for **Debian, Ubuntu and the distributions based on them** (Linux Mint, Pop!_OS, Zorin OS, elementary OS, MX Linux, Kali, Raspberry Pi OS, AnduinOS, …): **search, discover and manage software from APT, Flatpak, Snap and AppImage** in one interface, with a confirmation before every change. Built with **Tauri 2, React, TypeScript and Rust**. Light and dark themes follow the system.
 
 > **Language:** the interface follows the system language. It is shown in **Italian** when the system language is Italian and in **English** for every other language. See [Language](#language).
 
@@ -19,7 +19,7 @@ A desktop app store for Ubuntu: **search, discover and manage software from APT,
 - **Available in English and Italian**, following the system language.
 - **Search** by name – apps first, with the real name and **logo**; libraries and technical packages stay apart and can be included.
 - **Installed** and **Updates** lists with removal and per-app updates, and an **Open** button to start installed apps.
-- **One "Check for updates" button**: it refreshes the APT package lists (so updates from third-party repositories show up too), the Flatpak catalog and the Snap list in one go, then shows what can be updated. The APT lists are refreshed through PackageKit, like the Ubuntu Software Updater does, so **no password is asked**. Without the button the page only reads the lists already on the computer.
+- **One "Check for updates" button**: it refreshes the APT package lists (so updates from third-party repositories show up too), the Flatpak catalog and the Snap list in one go, then shows what can be updated. The APT lists are refreshed through PackageKit, like the system's software updater does, so **no password is asked**. Without the button the page only reads the lists already on the computer.
 - **Summary and confirmation** before every change, with dependencies, permissions and the exact command available.
 - **Operations that keep going with the window closed** – you can close the store while it installs, and a **notification** tells you when it is done.
 - A Debian package, a store icon and an optional launcher for the user's application menu.
@@ -29,38 +29,55 @@ There is no telemetry and no data about you is sent anywhere. Apps are read from
 | Source | Search | Scope of operations |
 | --- | --- | --- |
 | APT | Local indexes of the configured repositories | System packages, authorized through polkit |
-| Flatpak | Already configured remotes | New installs per user; updates and removals in the scope of the existing app |
+| Flatpak | Already configured remotes, user and system | New installs in the scope of the remote (per user, or system-wide when the distribution configured Flathub for everyone); updates and removals in the scope of the existing app |
 | Snap | Snap catalog through snapd, when available | One application at a time, with the restrictions below |
 | AppImage | AppImageHub catalog (GitHub projects), cached on disk | Per user, in the home folder: no administrator rights |
+
+## Supported distributions
+
+Nexa Store runs on **Debian, Ubuntu and every distribution based on them**: it checks `ID` and `ID_LIKE` in `/etc/os-release` (`debian` or `ubuntu`) and, for a derivative that does not declare its family, that the system is managed by dpkg and APT. Tauri 2 needs **WebKitGTK 4.1**, so the minimum releases are:
+
+| Family | Minimum release | Examples |
+| --- | --- | --- |
+| Debian | Debian 12 "bookworm" | Debian 12/13, MX Linux 23, Kali, Raspberry Pi OS (bookworm), PureOS, Devuan 5 |
+| Ubuntu | Ubuntu 22.04 LTS | Ubuntu and its flavours, Linux Mint 21/22, Pop!_OS 22.04/24.04, Zorin OS 17, elementary OS 7/8, AnduinOS |
+
+What changes between distributions is handled at run time:
+
+- **APT catalog** – the AppStream metadata is read from `/var/lib/swcatalog` (AppStream 1.0: Debian 13, Ubuntu 24.04 and later) and from `/var/lib/app-info` (older releases). Install the `appstream` package if the APT categories stay empty, then run "Check for updates" once.
+- **Flatpak** – both user and system remotes are used. Many derivatives ship Flathub as a system remote: apps from it are installed system-wide. With no remote at all, add Flathub with `flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo`.
+- **Snap** – optional. Linux Mint, AnduinOS, Debian and others ship without it on purpose: the source is simply turned off, with no warning. A warning appears only when the `snap` command exists but snapd does not answer.
+- **pkexec** – from the `pkexec` package (Debian 12, Ubuntu 24.04 and later) or from `policykit-1` (older releases). The Debian package accepts either.
+- **FUSE 2 for AppImages** – `libfuse2t64` (Debian 13, Ubuntu 24.04 and later) or `libfuse2` (older releases), recommended, not required.
 
 ## Install
 
 Download the `.deb` from the [latest release](../../releases/latest) and install it with APT, which pulls in the dependencies:
 
 ```bash
-sudo apt install ./nexa-store_0.6.1_ubuntu26.10_amd64.deb
+sudo apt install ./nexa-store_0.7.0_amd64.deb
 ```
 
-The package recommends `libfuse2t64`, which AppImages need to start normally (without it Nexa Store still runs them, by unpacking them first). The package is built for **Ubuntu 26.10 on amd64**. On other Ubuntu versions, [build from source](#build-from-source): a binary built on a recent release can need newer libraries than an older one provides. The SHA-256 checksum is in `SHA256SUMS.txt` next to the package.
+A `.deb` built on a recent release can need newer libraries (glibc, WebKitGTK) than an older release provides: if APT reports unmet dependencies, [build from source](#build-from-source) on that system — it takes a few minutes and produces a package for exactly that release. The SHA-256 checksum is in `SHA256SUMS.txt` next to the package.
 
 ## Requirements
 
-- **Ubuntu desktop** with a graphical session (developed and tested on Ubuntu 26.10, GNOME on Wayland).
-- To build: **Node.js 20+**, npm, **Rust 1.90+** and Cargo.
+- **Debian, Ubuntu or a derivative** (see [Supported distributions](#supported-distributions)) with a graphical session. Developed on Ubuntu 26.04/26.10 and AnduinOS 2 (GNOME on Wayland).
+- To build: **Node.js 20+**, npm, **Rust 1.90+** and Cargo. Where the distribution's packages are older (Debian 12: Rust 1.63, Node.js 18), install Rust with [rustup](https://rustup.rs/) and Node.js from [nodejs.org](https://nodejs.org/en/download).
 - GTK 3, WebKitGTK 4.1 and the other development libraries Tauri needs (see the [Tauri prerequisites for Linux](https://v2.tauri.app/start/prerequisites/)).
 - APT and polkit/`pkexec` for system operations.
-- Flatpak and at least one remote to use the Flatpak catalog.
+- Flatpak and at least one remote (user or system) to use the Flatpak catalog.
 - Snap with a running snapd to use the Snap source. Its absence does not stop the other sources from working.
-- A network connection for the AppImage source. `libfuse2t64` is recommended so AppImages start directly.
+- A network connection for the AppImage source. FUSE 2 (`libfuse2t64` or `libfuse2`) is recommended so AppImages start directly.
 
 ## Build from source
 
 ```bash
-./scripts/setup-ubuntu.sh        # checks the system and installs missing build dependencies (asks first)
+./scripts/setup.sh               # checks the system and installs missing build dependencies (asks first)
 npm run desktop                  # development window with hot reload
 ```
 
-The setup script lists the missing system packages and asks for explicit consent before running `sudo apt-get install --no-upgrade`. It does not upgrade the system, add repositories or configure Flatpak remotes. Snap is optional: pass `--with-snap` to include snapd in the request. It runs `npm ci` when `package-lock.json` is present; the first Rust build downloads the Cargo dependencies, so network access is required. **Do not run the app with `sudo`.**
+The setup script recognises any Debian or Ubuntu based system, picks the package names that release uses (`pkexec` or `policykit-1`, `libfuse2t64` or `libfuse2`, …), lists the missing system packages and asks for explicit consent before running `sudo apt-get install --no-upgrade`. The distribution's Rust and Node.js are used only when they are recent enough; otherwise it says where to get them and stops. It does not upgrade the system, add repositories or configure Flatpak remotes. Snap is optional: pass `--with-snap` to include snapd in the request. It runs `npm ci` when `package-lock.json` is present; the first Rust build downloads the Cargo dependencies, so network access is required. **Do not run the app with `sudo`.** (`scripts/setup-ubuntu.sh` still works and runs the same script.)
 
 To build and package:
 
@@ -113,9 +130,9 @@ Once confirmed, an operation no longer depends on the window.
 - **The final notification survives the app's exit.** GNOME Shell deletes the notifications linked to an app as soon as the app leaves the D-Bus (about a second later). So the notification sent right before quitting is not linked to the app: it stays in the notification list until dismissed, like `notify-send` ones. `scripts/test-background.py` checks this on the D-Bus.
 - Notifications use the standard desktop service (D-Bus); if it does not answer, `notify-send` is tried. If neither is available, the operation still proceeds. The text only says what was done and to which app; package names are stripped of any markup.
 
-**Flatpak apps and the application menu.** Nexa Store installs Flatpaks for the user. The graphical session reads the application folders once, at login: if the user Flatpak export folder did not exist then, Flatpak apps installed afterwards do not appear in the menu, the dock or the search until you log out and back in once. The store detects this (by comparing `XDG_DATA_DIRS`), shows a notice and repeats it in the end-of-install notification; meanwhile **Open** starts them directly.
+**Flatpak apps and the application menu.** From a user remote Nexa Store installs Flatpaks for the user. The graphical session reads the application folders once, at login: if the user Flatpak export folder did not exist then, Flatpak apps installed afterwards do not appear in the menu, the dock or the search until you log out and back in once. The store detects this (by comparing `XDG_DATA_DIRS`), shows a notice and repeats it in the end-of-install notification; meanwhile **Open** starts them directly.
 
-Limits: **one operation at a time**, each confirmed individually; with APT, Ubuntu may ask for the password at the start of each one.
+Limits: **one operation at a time**, each confirmed individually; with APT, the system may ask for the password at the start of each one.
 
 ## Language
 
@@ -144,15 +161,15 @@ The backend validates identifiers and starts executables with explicit arguments
 
 **APT.** The plan contains a real simulation, repeated before execution. Installs and upgrades are blocked if they require removals. Removing critical components, Essential/Protected packages or high-priority packages, and operations that remove more than 20 packages, are blocked. Local configuration is kept; no purge, autoremove or global upgrade is ever run. Search relies on local indexes and also includes libraries and command-line tools.
 
-**Flatpak.** No remote is added automatically. New installs need a user remote; updates and removals keep the scope of the installed app. The confirmation shows the ref, the commit and the declared permissions. Updates pin the approved commit. For new installs Flatpak offers no option to pin the commit, so the ref, the commit and the remote configuration are checked again right before starting. Runtimes and dependencies are resolved by Flatpak during the transaction.
+**Flatpak.** No remote is added automatically. New installs go to the scope of the remote that offers the app: per user from a user remote, system-wide from a system remote (Linux Mint, Pop!_OS, Zorin OS, elementary OS, AnduinOS and others configure Flathub that way; Flatpak's own polkit policy decides whether a password is needed). Updates and removals keep the scope of the installed app. The confirmation shows the ref, the commit and the declared permissions. Updates pin the approved commit. For new installs Flatpak offers no option to pin the commit, so the ref, the commit and the remote configuration are checked again right before starting. Runtimes and dependencies are resolved by Flatpak during the transaction.
 
-**Check for updates.** It runs, one after the other and each with its own re-check right before it starts, the APT list refresh, `flatpak update --user --appstream` and `snap refresh --list`. The APT lists are refreshed with a single D-Bus call to PackageKit (`RefreshCache`): Ubuntu's own polkit rule `org.freedesktop.packagekit.system-sources-refresh` lets a person using the computer do that without a password, and Nexa Store adds no rule, helper or privileged code. If PackageKit is missing or refuses, it falls back to `pkexec apt-get update` and says so (that one asks for the password). A source that is missing or cannot be refreshed is skipped and said so; a step that fails does not stop the others and the result lists each step. It installs and upgrades nothing, and a notification says how many updates were found. Installing, updating and removing APT packages still asks for the administrator password, on purpose.
+**Check for updates.** It runs, one after the other and each with its own re-check right before it starts, the APT list refresh, `flatpak update --appstream` (`--user` when only user remotes exist) and `snap refresh --list`. The APT lists are refreshed with a single D-Bus call to PackageKit (`RefreshCache`): PackageKit's polkit rule `org.freedesktop.packagekit.system-sources-refresh` lets a person using the computer do that without a password, and Nexa Store adds no rule, helper or privileged code. If PackageKit is missing or refuses, it falls back to `pkexec apt-get update` and says so (that one asks for the password). A source that is missing or cannot be refreshed is skipped and said so; a step that fails does not stop the others and the result lists each step. It installs and upgrades nothing, and a notification says how many updates were found. Installing, updating and removing APT packages still asks for the administrator password, on purpose.
 
 **Snap.** Only apps with **strict** confinement from the **stable** channel can be managed. Operations concern a single name: there is no global `snap refresh`. Classic, devmode and system components (kernel, gadget, base and snapd types) are excluded. The app's identity and conditions are checked again before execution. snapd keeps its own automatic-update policy; Nexa Store does not reconfigure it.
 
 **AppImage.** The identifier is a validated `owner/repo`; every address is checked against an allow-list, redirects included; the download is bounded in size and time and written to a private partial file that is deleted on any failure; size, checksum and file header are verified before the file becomes executable; paths are built from validated parts and the install record is re-validated before every use (a hand-edited or symlinked record is ignored). Removal only deletes the app's own folder and a launcher this module wrote.
 
-Always read the preview: actual dependencies, downloads and disk space depend on the package manager and the repository. The app does not force the removal of APT locks, does not change repositories or remotes and does not replace Ubuntu's recovery tools. Network, authorization or package-manager errors are reported in the result. The operations log lasts for the current session and is not stored as a persistent history.
+Always read the preview: actual dependencies, downloads and disk space depend on the package manager and the repository. The app does not force the removal of APT locks, does not change repositories or remotes and does not replace the distribution's recovery tools. Network, authorization or package-manager errors are reported in the result. The operations log lasts for the current session and is not stored as a persistent history.
 
 ## Tests
 
@@ -162,7 +179,7 @@ Run the Rust tests with `npm run test:rust` and the translation check with `npm 
 ./src-tauri/target/release/nexa-store --smoke-test
 ```
 
-`scripts/test-gui.py` is a **read-only** UI check of the real app: home, categories, changing proposals, a category page, search, details with source choice, logos, the installed list, a second launch of the app and an install confirmation and the update-check confirmation (both cancelled). It never runs an operation unless you set `NEXA_RUN_CHECK=1`, which also runs the update check (it refreshes the package lists and installs nothing; no password is asked when PackageKit allows it, otherwise Ubuntu asks for it):
+`scripts/test-gui.py` is a **read-only** UI check of the real app: home, categories, changing proposals, a category page, search, details with source choice, logos, the installed list, a second launch of the app and an install confirmation and the update-check confirmation (both cancelled). It never runs an operation unless you set `NEXA_RUN_CHECK=1`, which also runs the update check (it refreshes the package lists and installs nothing; no password is asked when PackageKit allows it, otherwise the system asks for it):
 
 ```bash
 python3 scripts/test-gui.py
@@ -199,7 +216,7 @@ src-tauri/src/          Rust backend
   store.rs, popular.rs  Random home page and category pages
 src-tauri/icons/        Desktop package icons (generated from icon.svg)
 src-tauri/packaging/    .desktop template for the Debian package
-scripts/                Ubuntu setup, launch, launcher, UI and language checks
+scripts/                Setup (Debian/Ubuntu family), launch, launcher, UI and language checks
 icon.svg                Store icon (source)
 CHANGELOG.md            Release notes
 ```

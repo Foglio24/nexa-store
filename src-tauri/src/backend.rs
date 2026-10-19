@@ -1,4 +1,5 @@
-//! Ubuntu package operations. All process arguments are explicit; no shell is used.
+//! Package operations for Debian, Ubuntu and the distributions based on them. All process
+//! arguments are explicit; no shell is used.
 use crate::packagekit;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -64,7 +65,9 @@ fn default_package_kind() -> String { "package".into() }
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemInfo {
-    pub ubuntu: bool,
+    /// Debian, Ubuntu or a distribution based on them (Linux Mint, Pop!_OS, Zorin OS, elementary OS,
+    /// MX Linux, Kali, Raspberry Pi OS, AnduinOS, …).
+    pub supported: bool,
     pub os_name: String,
     pub apt_available: bool,
     pub flatpak_available: bool,
@@ -236,14 +239,29 @@ fn query(program: &str, args: &[&str]) -> Result<String> {
 }
 
 pub(crate) fn available(path: &str) -> bool { fs::metadata(path).map(|m| m.is_file()).unwrap_or(false) }
-fn ubuntu_info() -> (bool, String) {
-    let content = fs::read_to_string("/etc/os-release").unwrap_or_default();
-    let fields: HashMap<_, _> = content.lines().filter_map(|l| l.split_once('='))
-        .map(|(k,v)| (k, v.trim_matches('"'))).collect();
-    (fields.get("ID") == Some(&"ubuntu"), fields.get("PRETTY_NAME").map(|name| name.to_string()).unwrap_or_else(|| tr!("Unknown Linux")))
+/// Whether an `os-release` file describes Debian, Ubuntu or a distribution derived from them:
+/// `ID` or one of the `ID_LIKE` entries is `debian` or `ubuntu`.
+fn debian_family(os_release: &str) -> bool {
+    let fields: HashMap<_, _> = os_release.lines().filter_map(|l| l.split_once('='))
+        .map(|(k,v)| (k.trim(), v.trim().trim_matches(|c| c == '"' || c == '\'').to_ascii_lowercase())).collect();
+    let id = fields.get("ID").map(String::as_str).unwrap_or("");
+    let like = fields.get("ID_LIKE").map(String::as_str).unwrap_or("");
+    std::iter::once(id).chain(like.split_whitespace()).any(|name| matches!(name, "debian" | "ubuntu"))
 }
-fn ensure_ubuntu() -> Result<()> {
-    if ubuntu_info().0 { Ok(()) } else { Err(tr!("Nexa Store only supports Ubuntu.")) }
+fn os_release_name(os_release: &str) -> Option<String> {
+    os_release.lines().filter_map(|l| l.split_once('=')).find(|(k,_)| k.trim() == "PRETTY_NAME")
+        .map(|(_,v)| v.trim().trim_matches(|c| c == '"' || c == '\'').to_string()).filter(|name| !name.is_empty())
+}
+/// A distribution is supported when its `os-release` says it is in the Debian family or, for a
+/// derivative that does not say so, when it is managed by dpkg and APT.
+fn distro_info() -> (bool, String) {
+    let content = fs::read_to_string("/etc/os-release").or_else(|_| fs::read_to_string("/usr/lib/os-release")).unwrap_or_default();
+    let supported = debian_family(&content)
+        || (available("/usr/bin/apt-get") && available("/usr/bin/dpkg-query") && std::path::Path::new("/var/lib/dpkg/status").is_file());
+    (supported, os_release_name(&content).unwrap_or_else(|| tr!("Unknown Linux")))
+}
+fn ensure_supported() -> Result<()> {
+    if distro_info().0 { Ok(()) } else { Err(tr!("Nexa Store supports Debian, Ubuntu and the distributions based on them.")) }
 }
 
 #[derive(Clone, Copy)]
@@ -334,22 +352,24 @@ pub fn flatpak_menu_hidden() -> bool {
 }
 
 pub fn system_info() -> Result<SystemInfo> {
-    let (ubuntu, os_name) = ubuntu_info();
+    let (supported, os_name) = distro_info();
     let apt_available = available("/usr/bin/apt-get") && available("/usr/bin/apt-cache") && available("/usr/bin/dpkg-query");
     let flatpak_available = available("/usr/bin/flatpak");
     let snap_available = available("/usr/bin/snap") && snap_get("/v2/system-info").is_ok();
     let mut warnings = Vec::new();
-    if !ubuntu { warnings.push(tr!("Unsupported system: Ubuntu is required.")); }
+    if !supported { warnings.push(tr!("Unsupported system: Nexa Store needs Debian, Ubuntu or a distribution based on them.")); }
     if !available("/usr/bin/pkexec") { warnings.push(tr!("pkexec is not available: APT operations need policykit-1/pkexec.")); }
     if !flatpak_available { warnings.push(tr!("Flatpak is not installed. The other sources are still available.")); }
-    if !snap_available { warnings.push(tr!("Snap is not available: check snapd and the /run/snapd.socket service.")); }
+    // Many Debian-based systems ship without Snap on purpose: only a snap command whose service does
+    // not answer is worth a warning. The sidebar already shows the source as off.
+    if available("/usr/bin/snap") && !snap_available { warnings.push(tr!("Snap is not available: check snapd and the /run/snapd.socket service.")); }
     if crate::appimage::catalog_loaded() == Some(false) { warnings.push(tr!("The AppImage catalog could not be loaded (no connection?). AppImage search stays empty until it can.")); }
     let mut flatpak_remotes = Vec::new();
     if flatpak_available {
         match remotes() {
             Ok(rows) => {
-                if !rows.iter().any(|r| r.scope == "user") {
-                    warnings.push(tr!("No user Flatpak remote is configured. To install Flatpak apps, first add a trusted remote with flatpak --user remote-add."));
+                if rows.is_empty() {
+                    warnings.push(tr!("No Flatpak remote is configured. To install Flatpak apps, first add a trusted remote, such as Flathub, with flatpak remote-add."));
                 }
                 for r in rows {
                     if !r.verified { warnings.push(tr!("Flatpak remote {}: GPG verification is disabled; operations will be blocked.", r.name)); }
@@ -359,7 +379,7 @@ pub fn system_info() -> Result<SystemInfo> {
             Err(e) => warnings.push(e),
         }
     }
-    Ok(SystemInfo { ubuntu, os_name, apt_available, flatpak_available, snap_available, appimage_available: true, flatpak_remotes, flatpak_menu_hidden: flatpak_available && flatpak_menu_hidden(), warnings })
+    Ok(SystemInfo { supported, os_name, apt_available, flatpak_available, snap_available, appimage_available: true, flatpak_remotes, flatpak_menu_hidden: flatpak_available && flatpak_menu_hidden(), warnings })
 }
 
 fn parse_dpkg(text: &str) -> Vec<Package> {
@@ -721,7 +741,7 @@ fn snap_identity(value: &serde_json::Value, channel: &str, store: bool) -> Resul
         identity.revision=snap_string(release,"revision");
         identity.confinement=snap_string(release,"confinement");
     }
-    if critical_snap(&identity.name,&identity.kind) { return Err(tr!("Snap operation blocked: a base, kernel, gadget, snapd or system component needs Ubuntu's dedicated tools.")); }
+    if critical_snap(&identity.name,&identity.kind) { return Err(tr!("Snap operation blocked: a base, kernel, gadget, snapd or system component needs the system's dedicated tools.")); }
     if identity.confinement != "strict" || identity.devmode { return Err(tr!("Snap operation blocked: only apps with strict confinement are supported; classic and devmode need a dedicated flow.")); }
     if identity.store_id.len() != 32 || !identity.store_id.bytes().all(|b|b.is_ascii_alphanumeric())
         || identity.revision.is_empty() || identity.revision.len() > 20 || !identity.revision.bytes().all(|b|b.is_ascii_digit()) || identity.revision == "0" {
@@ -771,7 +791,7 @@ fn snap_plan(package: Option<Package>, action: &str) -> Result<(Invocation,Proof
     let details=vec![tr!("App: {}. Snap Store ID: {}. Approved revision: {}. Channel: {}. Confinement: {}.",package.id,identity.store_id,identity.revision,channel,identity.confinement),
         tr!("Publisher declared by the Snap Store: {}. No --classic, --devmode, --dangerous or --purge option will be used.",identity.publisher),
         if action == "remove" {tr!("Removal deletes the app's revisions and data. Snapd normally takes an automatic snapshot unless it is disabled in the system settings. Back up any data you want to keep before confirming.")}
-            else {tr!("Snapd may install the bases, runtimes and components the app needs and handles connections and automatic updates according to Ubuntu's configuration. The operation selects only this app and keeps the approved stable channel.")},
+            else {tr!("Snapd may install the bases, runtimes and components the app needs and handles connections and automatic updates according to the system's configuration. The operation selects only this app and keeps the approved stable channel.")},
         tr!("The confirmation expires after 2 minutes and can be used once. Identity, publisher, installed revision and channel are checked again before administrator authentication.")];
     Ok((Invocation {program:"/usr/bin/pkexec".into(),args},Proof::Snap {action:action.into(),approved},details,true))
 }
@@ -779,7 +799,7 @@ fn snap_plan(package: Option<Package>, action: &str) -> Result<(Invocation,Proof
 /// Start an installed app, detached from this process. The identifier is validated and no shell is
 /// involved: a Flatpak or Snap by name, an APT package through its visible launcher file.
 pub fn open_app(package: Package) -> Result<()> {
-    ensure_ubuntu()?;
+    ensure_supported()?;
     let (program, args): (&str, Vec<String>) = match package.source {
         Source::Appimage => return crate::appimage::open(&package),
         Source::Flatpak => {
@@ -814,7 +834,7 @@ pub fn open_app(package: Package) -> Result<()> {
 }
 
 pub fn search_packages(query_text: String, source: String) -> Result<Vec<Package>> {
-    ensure_ubuntu()?;
+    ensure_supported()?;
     let q = validate_query(&query_text)?;
     let sel = selected(&source)?;
     let mut result = Vec::new();
@@ -834,7 +854,7 @@ pub fn search_packages(query_text: String, source: String) -> Result<Vec<Package
     Ok(result)
 }
 pub fn list_installed(source: String) -> Result<Vec<Package>> {
-    ensure_ubuntu()?;
+    ensure_supported()?;
     let sel = selected(&source)?;
     let mut result = Vec::new();
     if sel.apt { result.extend(apt_installed()?); }
@@ -854,7 +874,7 @@ pub fn list_installed(source: String) -> Result<Vec<Package>> {
     Ok(result)
 }
 pub fn list_updates(source: String) -> Result<Vec<Package>> {
-    ensure_ubuntu()?;
+    ensure_supported()?;
     let sel = selected(&source)?;
     let mut result = Vec::new();
     if sel.apt {
@@ -982,7 +1002,7 @@ fn flatpak_details(package: Package) -> Result<PackageDetails> {
         license: fields.get("License").map(|s| s.to_string()) })
 }
 pub fn package_details(package: Package) -> Result<PackageDetails> {
-    ensure_ubuntu()?;
+    ensure_supported()?;
     let mut details=match package.source { Source::Apt => apt_details(package), Source::Flatpak => flatpak_details(package), Source::Snap => snap_details(package), Source::Appimage => crate::appimage::details(package) }?;
     enrich_packages(std::slice::from_mut(&mut details.package));
     Ok(details)
@@ -1008,8 +1028,17 @@ fn critical_package(id: &str) -> bool {
     let id = base_id(id);
     matches!(id, "apt" | "dpkg" | "bash" | "dash" | "libc6" | "sudo" | "pkexec" | "polkitd" |
         "policykit-1" | "coreutils" | "mount" | "util-linux" | "login" | "passwd" | "init" |
-        "network-manager" | "gdm3" | "gnome-shell" | "dbus" | "openssh-server") ||
-        ["systemd", "ubuntu-minimal", "ubuntu-standard", "ubuntu-desktop", "linux-image", "linux-generic", "linux-virtual", "linux-oem", "grub", "shim", "cryptsetup", "base-files", "base-passwd"].iter().any(|prefix| id.starts_with(prefix))
+        "network-manager" | "gdm3" | "gnome-shell" | "dbus" | "openssh-server" | "lightdm" | "sddm" | "lxdm" |
+        "slick-greeter" | "cinnamon" | "mate-desktop" | "xfce4" | "xfce4-session" | "plasma-desktop" | "plasma-workspace" |
+        "budgie-desktop" | "lxqt" | "pantheon" | "gala" | "cosmic-session" | "libc-bin" | "initramfs-tools" | "dracut" |
+        "ifupdown" | "netplan.io" | "e2fsprogs" | "btrfs-progs" | "zfsutils-linux" | "tasksel" | "xserver-xorg" | "xwayland") ||
+        ["systemd", "ubuntu-minimal", "ubuntu-standard", "ubuntu-desktop", "linux-image", "linux-generic", "linux-virtual", "linux-oem",
+         "linux-modules", "grub", "shim", "cryptsetup", "base-files", "base-passwd", "debian-archive-keyring", "mint-meta", "mintsystem",
+         "pop-desktop", "pop-default-settings", "zorin-os-", "elementary-desktop", "kali-linux-", "raspberrypi-", "raspi-", "mx-system",
+         "deepin-desktop", "kubuntu-desktop", "xubuntu-desktop", "lubuntu-desktop", "ubuntu-mate-desktop", "ubuntucinnamon-desktop",
+         "ubuntustudio-desktop", "anduinos-"].iter().any(|prefix| id.starts_with(prefix)) ||
+        // Debian's tasksel meta-packages: `task-desktop`, `task-gnome-desktop`, `task-kde-desktop`…
+        (id.starts_with("task-") && id.ends_with("-desktop")) || id == "task-desktop"
 }
 fn check_removals(effects: &AptEffects, target: &str, action: &str) -> Result<()> {
     if action != "remove" && !effects.removals.is_empty() {
@@ -1076,7 +1105,7 @@ pub fn operation_running() -> bool { MUTATING.load(Ordering::Acquire) }
 pub fn running_operation() -> Option<OperationInfo> { CURRENT.lock().ok().and_then(|current| current.clone()) }
 
 fn apt_plan(package: Option<Package>, action: &str) -> Result<(Invocation, Proof, Vec<String>, bool)> {
-    if !available("/usr/bin/pkexec") { return Err(tr!("pkexec is not available: install pkexec with Ubuntu's tools.")); }
+    if !available("/usr/bin/pkexec") { return Err(tr!("pkexec is not available: install the pkexec package (policykit-1 on older releases).")); }
     let mut common = vec!["-y".to_string(), "-o".into(), "DPkg::Lock::Timeout=30".into(),
         "-o".into(), "Acquire::Retries=1".into(), "-o".into(), "Acquire::http::Timeout=30".into(),
         "-o".into(), "Acquire::https::Timeout=30".into(), "-o".into(), "APT::Get::AutomaticRemove=false".into(),
@@ -1092,7 +1121,7 @@ fn apt_plan(package: Option<Package>, action: &str) -> Result<(Invocation, Proof
     if package.source != Source::Apt { return Err(tr!("The package source does not match.")); }
     apt_id(&package.id)?;
     let installed = apt_installed()?.iter().any(|p| p.id == package.id || base_id(&p.id) == base_id(&package.id));
-    if action == "remove" && critical_package(&package.id) { return Err(tr!("Removal blocked: critical Ubuntu component.")); }
+    if action == "remove" && critical_package(&package.id) { return Err(tr!("Removal blocked: critical system component.")); }
     if (action == "remove" || action == "update") && !installed { return Err(tr!("The package is not installed.")); }
     if action == "install" && installed { return Err(tr!("The package is already installed; use Update if available.")); }
     if action == "update" && !apt_updates()?.iter().any(|p| base_id(&p.id) == base_id(&package.id)) {
@@ -1119,10 +1148,13 @@ fn apt_plan(package: Option<Package>, action: &str) -> Result<(Invocation, Proof
         Proof::Apt { simulation, effects, target: package.id, action: action.into() },details,true))
 }
 
-fn flatpak_remote(package: &Package, install: bool) -> Result<Remote> {
+fn flatpak_remote(package: &Package) -> Result<Remote> {
     let name = package.remote.as_deref().ok_or_else(|| tr!("Flatpak remote not specified."))?;
     remote_id(name)?;
-    let scope = if install { "user" } else { package.scope.as_deref().unwrap_or("user") };
+    // A new install goes to the installation of the remote that offers the app: per user when the
+    // remote is a user one, system-wide when the distribution configured it for everyone (Linux
+    // Mint, Pop!_OS, Zorin OS, elementary OS and others ship Flathub as a system remote).
+    let scope = package.scope.as_deref().unwrap_or("user");
     scope_arg(Some(scope))?;
     let remote = remotes()?.into_iter().find(|r| r.name == name && r.scope == scope)
         .ok_or_else(|| tr!("The remote {} is not configured in the {} scope. Nexa Store does not add remotes automatically.", name, scope))?;
@@ -1133,10 +1165,14 @@ fn flatpak_plan(package: Option<Package>, action: &str) -> Result<(Invocation, P
     if !available("/usr/bin/flatpak") { return Err(tr!("Flatpak is not installed.")); }
     if action == "refresh" {
         let rows = remotes()?;
-        if !rows.iter().any(|r| r.scope == "user") { return Err(tr!("No user Flatpak remote is configured.")); }
-        if rows.iter().any(|r| r.scope == "user" && !r.verified) { return Err(tr!("A user remote does not verify GPG signatures; metadata update blocked.")); }
-        return Ok((Invocation::new("/usr/bin/flatpak", &["update", "--user", "--appstream", "--noninteractive", "--assumeyes"]),
-            Proof::Flatpak {checks:vec![],remotes:rows},vec![tr!("Only refreshes the AppStream metadata of the configured user Flatpak remotes; apps stay unchanged.")],false));
+        if rows.is_empty() { return Err(tr!("No Flatpak remote is configured.")); }
+        if rows.iter().any(|r| !r.verified) { return Err(tr!("A Flatpak remote does not verify GPG signatures; metadata update blocked.")); }
+        // Without --user or --system Flatpak refreshes every installation; refreshing the catalog of a
+        // system remote is allowed to any user by Flatpak's polkit policy, so no password is asked.
+        let args: &[&str] = if rows.iter().any(|r| r.scope == "system") { &["update", "--appstream", "--noninteractive", "--assumeyes"] }
+            else { &["update", "--user", "--appstream", "--noninteractive", "--assumeyes"] };
+        return Ok((Invocation::new("/usr/bin/flatpak", args),
+            Proof::Flatpak {checks:vec![],remotes:rows},vec![tr!("Only refreshes the AppStream metadata of the configured Flatpak remotes; apps stay unchanged.")],false));
     }
     let mut package = package.ok_or_else(|| tr!("Select a Flatpak app."))?;
     if package.source != Source::Flatpak { return Err(tr!("The package source does not match.")); }
@@ -1150,10 +1186,10 @@ fn flatpak_plan(package: Option<Package>, action: &str) -> Result<(Invocation, P
     let mut details = Vec::new();
     let trusted_remotes = remotes()?;
     let mut approved_commit = None;
-    let scope = if action == "install" { "--user" } else { scope_arg(package.scope.as_deref())? };
+    let scope = requested_scope;
     let reference;
     if action == "install" || action == "update" {
-        let remote = flatpak_remote(&package, action == "install")?;
+        let remote = flatpak_remote(&package)?;
         let remote_scope = scope_arg(Some(&remote.scope))?;
         let resolve = Invocation::new("/usr/bin/flatpak", &["remote-info", remote_scope, "--show-ref", &remote.name, &package.id]);
         reference = run_checked(&resolve)?.trim().to_string();
@@ -1176,7 +1212,11 @@ fn flatpak_plan(package: Option<Package>, action: &str) -> Result<(Invocation, P
         checks.push((installed_commit,value));
     }
     let mut args = vec![match action { "install" => "install", "remove" => "uninstall", "update" => "update", _ => return Err(tr!("Invalid action.")) }.into(),
-        scope.into(), "--noninteractive".into(), "--assumeyes".into()];
+        scope.into()];
+    // --noninteractive also stops Flatpak from asking polkit for a password, which a system-wide
+    // change may need; --assumeyes alone still answers Flatpak's own questions.
+    if scope == "--user" { args.push("--noninteractive".into()); }
+    args.push("--assumeyes".into());
     if action == "update" {
         args.push(format!("--commit={}",approved_commit.ok_or_else(|| tr!("Approved commit missing."))?));
     }
@@ -1225,7 +1265,7 @@ fn check_plan() -> Result<Plan> {
         match plan {
             // The APT lists go through PackageKit when the system has it: no password, like the Software Updater.
             Ok((invocation, proof, _, _)) if name == "APT" && packagekit::available() => {
-                details.push(tr!("Refreshes the APT package lists through PackageKit, the service the Ubuntu Software Updater uses. Your session is allowed to do this without a password; if PackageKit refuses, Ubuntu asks for your password and the standard apt-get update is used instead."));
+                details.push(tr!("Refreshes the APT package lists through PackageKit, the service the system's software updater uses. Your session is allowed to do this without a password; if PackageKit refuses, the system asks for your password and the standard apt-get update is used instead."));
                 steps.push(CheckStep { name, run: StepRun::PackageKit { fallback: invocation }, proof });
             },
             Ok((invocation, proof, lines, admin)) => { requires_admin |= admin; details.extend(lines); steps.push(CheckStep { name, run: StepRun::Command(invocation), proof }); },
@@ -1239,7 +1279,7 @@ fn check_plan() -> Result<Plan> {
 }
 
 pub fn prepare_operation(package: Option<Package>, action: String, source: Option<String>) -> Result<Plan> {
-    ensure_ubuntu()?;
+    ensure_supported()?;
     if MUTATING.load(Ordering::Acquire) { return Err(tr!("Another operation is in progress. Wait for it to finish.")); }
     if !matches!(action.as_str(),"install"|"remove"|"update"|"refresh") { return Err(tr!("Invalid action.")); }
     if action == "refresh" && package.is_none() && source.as_deref() == Some("all") { return check_plan(); }
@@ -1334,7 +1374,7 @@ fn run_check_with(steps: &[CheckStep], refresh_with_packagekit: &dyn Fn() -> pac
 }
 
 pub fn execute_operation(token: String) -> Result<OperationResult> {
-    ensure_ubuntu()?;
+    ensure_supported()?;
     if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) { return Err(tr!("Invalid confirmation token.")); }
     if MUTATING.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).is_err() {
         return Err(tr!("Another operation is already in progress."));
@@ -1596,8 +1636,9 @@ mod tests {
         assert!(check_removals(&e,"bash","remove").is_err());
         let mut many=apt_effects("").unwrap(); many.removals=(0..21).map(|n|format!("app{n}")).collect();
         assert!(check_removals(&many,"app0","remove").is_err());
-        for critical in ["bash","linux-image-6.17-generic","ubuntu-desktop-minimal","systemd-sysv","grub-efi-amd64","libc6:amd64"] {assert!(critical_package(critical));}
-        assert!(!critical_package("gimp"));
+        for critical in ["bash","linux-image-6.17-generic","ubuntu-desktop-minimal","systemd-sysv","grub-efi-amd64","libc6:amd64",
+            "task-gnome-desktop","task-desktop","mint-meta-cinnamon","cinnamon","lightdm","sddm","pop-desktop","kali-linux-default","raspi-config"] {assert!(critical_package(critical),"{critical}");}
+        for ordinary in ["gimp","task-spooler","debian-goodies","mintstick"] {assert!(!critical_package(ordinary),"{ordinary}");}
     }
     #[test]
     fn flatpak_list_in_the_format_printed_by_flatpak_1_18_is_not_dropped() {
@@ -1617,6 +1658,26 @@ mod tests {
         assert_eq!(rows.len(),1); assert_eq!(rows[0].scope.as_deref(),Some("system")); assert!(rows[0].id.starts_with("app/"));
     }
     #[test]
+    fn debian_family_is_read_from_id_and_id_like() {
+        for (text, expected) in [
+            ("ID=ubuntu\nID_LIKE=debian\n", true),
+            ("ID=debian\n", true),
+            ("ID=linuxmint\nID_LIKE=\"ubuntu debian\"\n", true),
+            ("ID=pop\nID_LIKE=\"ubuntu debian\"\n", true),
+            ("ID=anduinos\nID_LIKE=debian\n", true),
+            ("ID=kali\nID_LIKE=debian\n", true),
+            ("ID='raspbian'\nID_LIKE='debian'\n", true),
+            ("ID=Zorin\nID_LIKE=\"Ubuntu Debian\"\n", true),
+            ("ID=fedora\n", false),
+            ("ID=arch\n", false),
+            ("ID=opensuse-tumbleweed\nID_LIKE=\"opensuse suse\"\n", false),
+            ("ID=debianish\n", false),
+            ("", false),
+        ] { assert_eq!(debian_family(text), expected, "{text}"); }
+        assert_eq!(os_release_name("NAME=X\nPRETTY_NAME=\"Linux Mint 22\"\n").as_deref(), Some("Linux Mint 22"));
+        assert_eq!(os_release_name("NAME=X\n"), None);
+    }
+    #[test]
     fn searches_are_bounded_and_regex_is_literal() {
         assert!(validate_query("a").is_err()); assert!(validate_query("abc\ndef").is_err()); assert!(validate_query(&"a".repeat(121)).is_err());
         assert_eq!(regex_literal("g++"),"g\\+\\+");
@@ -1624,7 +1685,7 @@ mod tests {
     }
     #[test]
     fn expired_tokens_are_consumed_and_execution_is_one_use() {
-        if !ubuntu_info().0 { return; }
+        if !distro_info().0 { return; }
         assert!(execute_operation("0".repeat(64)).is_err());
         let expired="e".repeat(64);
         let consumed="d".repeat(64);

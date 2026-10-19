@@ -26,6 +26,10 @@ const MAX_LINE: usize = 1024 * 1024;
 const MAX_ICON_BYTES: u64 = 512 * 1024;
 const MAX_ICON_CACHE_BYTES: usize = 16 * 1024 * 1024;
 const SIZES: [&str; 5] = ["128x128", "64x64@2", "64x64", "256x256", "48x48"];
+/// Where `appstreamcli` keeps the APT AppStream catalog: `/var/lib/swcatalog` since AppStream 1.0
+/// (Debian 13, Ubuntu 24.04 and later), `/var/lib/app-info` before (Debian 11/12, Ubuntu 22.04,
+/// Linux Mint 21). Often one is a link to the other.
+const APPSTREAM_ROOTS: [&str; 2] = ["/var/lib/swcatalog", "/var/lib/app-info"];
 static CATALOG: OnceLock<Mutex<Option<Catalog>>> = OnceLock::new();
 static IMAGES: OnceLock<Mutex<Option<ImageCache>>> = OnceLock::new();
 static FLATPAK_TYPES: OnceLock<Mutex<HashMap<PathBuf, FlatpakTypes>>> = OnceLock::new();
@@ -244,6 +248,17 @@ fn within(path: &Path, root: &Path) -> Option<PathBuf> {
     path.starts_with(root).then_some(path)
 }
 
+/// The AppStream catalog folders that exist on this system, each real folder once.
+fn appstream_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    for root in APPSTREAM_ROOTS {
+        if let Ok(canonical) = Path::new(root).canonicalize() {
+            if canonical.is_dir() && !roots.contains(&canonical) { roots.push(canonical); }
+        }
+    }
+    roots
+}
+
 /// For a `.desktop` file that is a visible application (Type=Application, with an Exec line, and
 /// neither NoDisplay nor Hidden), the icon name it declares (possibly empty); otherwise `None`.
 fn desktop_entry_icon(text: &str) -> Option<String> {
@@ -335,13 +350,16 @@ fn installed_desktops(metadata: &mut Metadata) {
 
 fn load_catalog() -> Catalog {
     let mut metadata = Metadata::default();
-    let directory = Path::new("/var/lib/swcatalog/yaml");
-    for path in sorted_children(directory, 128) {
+    let roots = appstream_roots();
+    let mut read = HashSet::new();
+    for path in roots.iter().flat_map(|root| sorted_children(&root.join("yaml"), 128)) {
         if metadata.bytes >= MAX_METADATA_TOTAL || metadata.documents >= MAX_DOCUMENTS { break; }
         if !path.file_name().and_then(|name| name.to_str()).map(|name| name.ends_with(".yml.gz")).unwrap_or(false) { continue; }
-        // Ubuntu intentionally links swcatalog metadata into APT's root-owned lists.
+        // AppStream intentionally links the catalog files into APT's root-owned lists.
+        let directory = path.parent().unwrap_or(Path::new("/"));
         let canonical = within(&path, directory).or_else(|| within(&path, Path::new("/var/lib/apt/lists")));
         let Some(path) = canonical else { continue; };
+        if !read.insert(path.clone()) { continue; }
         let Ok(file) = fs::File::open(path) else { continue; };
         let limit = MAX_METADATA_FILE.min(MAX_METADATA_TOTAL.saturating_sub(metadata.bytes));
         let decoder = GzDecoder::new(file).take(limit + 1);
@@ -358,15 +376,16 @@ fn load_catalog() -> Catalog {
     }
     installed_desktops(&mut metadata);
     let mut icons = HashMap::new();
-    let icon_root = Path::new("/var/lib/swcatalog/icons");
     for size in SIZES {
-        for origin in sorted_children(icon_root, 128) {
-            if within(&origin, icon_root).is_none() { continue; }
-            for path in sorted_children(&origin.join(size), 30_000) {
-                let Some(name) = path.file_name().and_then(|name| name.to_str()) else { continue; };
-                let Some((package, _)) = name.split_once('_') else { continue; };
-                if metadata.applications.contains(package) && !icons.contains_key(package) && raster_extension(&path) {
-                    if let Some(canonical) = within(&path, icon_root) { icons.insert(package.to_string(), canonical); }
+        for icon_root in roots.iter().map(|root| root.join("icons")) {
+            for origin in sorted_children(&icon_root, 128) {
+                if within(&origin, &icon_root).is_none() { continue; }
+                for path in sorted_children(&origin.join(size), 30_000) {
+                    let Some(name) = path.file_name().and_then(|name| name.to_str()) else { continue; };
+                    let Some((package, _)) = name.split_once('_') else { continue; };
+                    if metadata.applications.contains(package) && !icons.contains_key(package) && raster_extension(&path) {
+                        if let Some(canonical) = within(&path, &icon_root) { icons.insert(package.to_string(), canonical); }
+                    }
                 }
             }
         }
@@ -482,7 +501,7 @@ fn apt_icon(id: &str) -> Option<String> {
     let id = package_name(id)?;
     let (path, mut names) = with_catalog(|catalog| (catalog.icons.get(id).cloned(), catalog.metadata.ids.get(id).cloned().unwrap_or_default()));
     if let Some(path) = path {
-        if let Some(data) = image_data(&path, Path::new("/var/lib/swcatalog/icons")) { return Some(data); }
+        if let Some(data) = appstream_roots().iter().find_map(|root| image_data(&path, &root.join("icons"))) { return Some(data); }
     }
     names.push(id.to_string());
     theme_icon(&names)
@@ -1051,7 +1070,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires Ubuntu AppStream, dpkg and a per-user Flathub catalog"]
+    #[ignore = "requires the APT AppStream catalog, dpkg and a Flathub catalog"]
     fn real_local_gimp_catalog_and_logos() {
         assert!(apt_is_application("gimp"));
         assert!(!apt_is_application("gimp-data"));
