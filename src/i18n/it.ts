@@ -161,7 +161,10 @@ export const italian: Record<string, string> = {
   "There are results of another type.": "Ci sono risultati di un altro tipo.",
   "Check the name or try another source.": "Controlla il nome o prova con un'altra sorgente.",
   "Check for updates": "Controlla aggiornamenti",
-  "Refreshes the APT lists, the Flatpak catalog and the Snap list, then shows what can be updated.": "Aggiorna gli elenchi APT, il catalogo Flatpak e l'elenco Snap, poi mostra cosa si può aggiornare.",
+  "“Update all” installs every update of every source in one go; “Check for updates” refreshes the lists first.": "«Aggiorna tutto» installa in una volta sola gli aggiornamenti di ogni sorgente; «Controlla aggiornamenti» aggiorna prima gli elenchi.",
+  "Update all": "Aggiorna tutto",
+  "Update all ({})": "Aggiorna tutto ({})",
+  "All updates were installed.": "Tutti gli aggiornamenti sono stati installati.",
   "Updates are read from the lists on this computer: press “Check for updates” to refresh them first.": "Gli aggiornamenti si leggono dagli elenchi su questo computer: premi «Controlla aggiornamenti» per aggiornarli prima.",
   "Update check finished.": "Controllo aggiornamenti terminato.",
 };

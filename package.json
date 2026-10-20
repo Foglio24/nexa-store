@@ -1,7 +1,7 @@
 {
   "name": "nexa-store",
   "private": true,
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "An app store for Debian, Ubuntu and their derivatives: APT, Flatpak, Snap and AppImage in one place",
   "license": "MIT",
   "repository": {

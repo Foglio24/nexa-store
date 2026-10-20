@@ -8,7 +8,7 @@ export interface StoreActions {
   busy: boolean;
   openGroup: (group: AppGroup) => void;
   openPackage: (pkg: StorePackage) => void;
-  /** `source` is `'all'` only for the update check, which refreshes every source at once. */
+  /** `source` is `'all'` only for the update check and for "update all", which cover every source at once. */
   prepare: (action: Action, pkg?: StorePackage, source?: PackageSource | 'all') => void;
   /** Start an installed app. */
   open: (pkg: StorePackage) => void;

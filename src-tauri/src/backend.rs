@@ -1077,15 +1077,18 @@ enum StepRun {
     /// without a password. `fallback` is the administrator route, used only if PackageKit is not
     /// there or refuses.
     PackageKit { fallback: Invocation },
+    /// Update an AppImage: a verified download done inside the app, like a single AppImage update.
+    Appimage(Box<crate::appimage::Prepared>),
 }
-/// One source's part of an update check: how it runs and the proof it was approved against.
-struct CheckStep { name: &'static str, run: StepRun, proof: Proof }
+/// One part of an update check or of "update everything": how it runs and the proof it was approved against.
+struct CheckStep { name: String, run: StepRun, proof: Proof }
 impl CheckStep {
     /// What the confirmation shows as the "command" of this step.
     fn display(&self) -> String {
         match &self.run {
             StepRun::Command(invocation) => invocation.display(),
             StepRun::PackageKit { .. } => "D-Bus org.freedesktop.PackageKit: CreateTransaction, then Transaction.RefreshCache(force=true)".into(),
+            StepRun::Appimage(prepared) => prepared.describe(),
         }
     }
 }
@@ -1104,12 +1107,71 @@ pub fn operation_info(token: &str) -> Option<OperationInfo> {
 pub fn operation_running() -> bool { MUTATING.load(Ordering::Acquire) }
 pub fn running_operation() -> Option<OperationInfo> { CURRENT.lock().ok().and_then(|current| current.clone()) }
 
-fn apt_plan(package: Option<Package>, action: &str) -> Result<(Invocation, Proof, Vec<String>, bool)> {
-    if !available("/usr/bin/pkexec") { return Err(tr!("pkexec is not available: install the pkexec package (policykit-1 on older releases).")); }
-    let mut common = vec!["-y".to_string(), "-o".into(), "DPkg::Lock::Timeout=30".into(),
+/// Options of every APT change: no question, bounded waits, local configuration kept, no autoremove.
+fn apt_options() -> Vec<String> {
+    vec!["-y".to_string(), "-o".into(), "DPkg::Lock::Timeout=30".into(),
         "-o".into(), "Acquire::Retries=1".into(), "-o".into(), "Acquire::http::Timeout=30".into(),
         "-o".into(), "Acquire::https::Timeout=30".into(), "-o".into(), "APT::Get::AutomaticRemove=false".into(),
-        "-o".into(), "Dpkg::Options::=--force-confdef".into(), "-o".into(), "Dpkg::Options::=--force-confold".into()];
+        "-o".into(), "Dpkg::Options::=--force-confdef".into(), "-o".into(), "Dpkg::Options::=--force-confold".into()]
+}
+
+/// `apt list --upgradable` → `name:arch=version` targets (`name=version` for `all`), skipping held
+/// packages, which an upgrade must leave alone. Every part is validated; anything odd is left out.
+fn apt_upgrade_targets(text: &str, held: &HashSet<String>) -> Vec<String> {
+    text.lines().filter_map(|line| {
+        let (name, rest) = line.split_once('/')?;
+        if !rest.contains("[upgradable from:") || apt_id(name).is_err() || held.contains(name) { return None; }
+        let cols: Vec<_> = rest.split_whitespace().collect();
+        let (version, arch) = (*cols.get(1)?, *cols.get(2)?);
+        if version.is_empty() || version.len() > 255 || !version.bytes().all(|b| b.is_ascii_alphanumeric() || b".:+~-".contains(&b)) { return None; }
+        if arch.is_empty() || !arch.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') { return None; }
+        if held.contains(&format!("{name}:{arch}")) { return None; }
+        Some(if arch == "all" { format!("{name}={version}") } else { format!("{name}:{arch}={version}") })
+    }).collect()
+}
+
+/// The APT part of "update everything": every upgradable package, pinned to the version listed, in a
+/// single `apt-get --only-upgrade --no-remove install`. Like a single update, it is simulated first,
+/// may bring in new dependencies, never removes a package and never touches held packages.
+fn apt_upgrade_plan() -> Result<(Invocation, Proof, Vec<String>)> {
+    if !available("/usr/bin/pkexec") { return Err(tr!("pkexec is not available: install the pkexec package (policykit-1 on older releases).")); }
+    let held: HashSet<String> = query("/usr/bin/apt-mark", &["showhold"]).unwrap_or_default().lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+    let targets = apt_upgrade_targets(&query("/usr/bin/apt", &["list", "--upgradable"])?, &held);
+    if targets.is_empty() { return Err(tr!("No APT update available.")); }
+    let mut operation: Vec<String> = vec!["--no-remove".into(), "--only-upgrade".into(), "install".into(), "--".into()];
+    operation.extend(targets.iter().cloned());
+    let mut simulation_args = vec!["--simulate".into()]; simulation_args.extend(operation.clone());
+    let simulation = Invocation { program: "/usr/bin/apt-get".into(), args: simulation_args };
+    let output = run_checked(&simulation)?;
+    let effects = apt_effects(&output)?;
+    check_removals(&effects, "", "update")?;
+    if effects.installs.is_empty() { return Err(tr!("No APT update available.")); }
+    let mut args = vec!["/usr/bin/apt-get".to_string()]; args.extend(apt_options()); args.extend(operation);
+    let mut details = vec![tr!("APT: {} packages are upgraded to the listed versions in a single run. New dependencies may be installed; nothing is removed and held packages are left alone.", targets.len())];
+    if !held.is_empty() { details.push(tr!("Held packages left alone: {}.", held.iter().cloned().collect::<Vec<_>>().join(", "))); }
+    details.push(output);
+    Ok((Invocation { program: "/usr/bin/pkexec".into(), args }, Proof::Apt { simulation, effects, target: String::new(), action: "update".into() }, details))
+}
+
+/// The Flatpak part of "update everything" for one installation: `flatpak update` of all its apps and
+/// runtimes from the remotes already configured, which must verify GPG signatures.
+fn flatpak_update_all_plan(scope: &str) -> Result<(Invocation, Proof, String)> {
+    if !available("/usr/bin/flatpak") { return Err(tr!("Flatpak is not installed.")); }
+    let rows = remotes()?;
+    if rows.iter().any(|r| r.scope == scope && !r.verified) { return Err(tr!("Operation blocked: the Flatpak remote does not verify GPG signatures.")); }
+    let arg = scope_arg(Some(scope))?;
+    let mut args = vec!["update", arg];
+    // As for a single system-wide change, polkit must be able to ask for a password.
+    if scope == "user" { args.push("--noninteractive"); }
+    args.push("--assumeyes");
+    let detail = if scope == "user" { tr!("Flatpak (your apps): updates every app and runtime installed for you to the latest version of its remote. No remote is added and unused runtimes are kept.") }
+        else { tr!("Flatpak (system-wide apps): updates every app and runtime installed for everyone to the latest version of its remote. No remote is added and unused runtimes are kept.") };
+    Ok((Invocation::new("/usr/bin/flatpak", &args), Proof::Flatpak { checks: vec![], remotes: rows }, detail))
+}
+
+fn apt_plan(package: Option<Package>, action: &str) -> Result<(Invocation, Proof, Vec<String>, bool)> {
+    if !available("/usr/bin/pkexec") { return Err(tr!("pkexec is not available: install the pkexec package (policykit-1 on older releases).")); }
+    let mut common = apt_options();
     if action == "refresh" {
         common.push("update".into());
         let mut args = vec!["/usr/bin/apt-get".into()]; args.extend(common);
@@ -1266,9 +1328,9 @@ fn check_plan() -> Result<Plan> {
             // The APT lists go through PackageKit when the system has it: no password, like the Software Updater.
             Ok((invocation, proof, _, _)) if name == "APT" && packagekit::available() => {
                 details.push(tr!("Refreshes the APT package lists through PackageKit, the service the system's software updater uses. Your session is allowed to do this without a password; if PackageKit refuses, the system asks for your password and the standard apt-get update is used instead."));
-                steps.push(CheckStep { name, run: StepRun::PackageKit { fallback: invocation }, proof });
+                steps.push(CheckStep { name: name.into(), run: StepRun::PackageKit { fallback: invocation }, proof });
             },
-            Ok((invocation, proof, lines, admin)) => { requires_admin |= admin; details.extend(lines); steps.push(CheckStep { name, run: StepRun::Command(invocation), proof }); },
+            Ok((invocation, proof, lines, admin)) => { requires_admin |= admin; details.extend(lines); steps.push(CheckStep { name: name.into(), run: StepRun::Command(invocation), proof }); },
             Err(error) => details.push(tr!("{} is skipped: {}", name, error)),
         }
     }
@@ -1278,11 +1340,71 @@ fn check_plan() -> Result<Plan> {
     store_plan(Invocation::new("nexa-store", &["check"]), Proof::Check(steps), info, tr!("Check for updates"), details, requires_admin)
 }
 
+/// "Update everything": what the Updates page lists, in one confirmation. APT goes in a single upgrade,
+/// each Flatpak installation in one `flatpak update`, each Snap and each AppImage on its own with the
+/// checks of a single update. Every step is checked again right before it starts, and one that fails
+/// (a cancelled password prompt, a network error) does not stop the others.
+fn update_all_plan() -> Result<Plan> {
+    let updates = list_updates("all".into())?;
+    let has = |source: Source, scope: Option<&str>| updates.iter().any(|p| p.source == source && (scope.is_none() || p.scope.as_deref() == scope));
+    let mut details = vec![tr!("Installs every update shown on the Updates page, one source after the other. Each step is checked again right before it starts; if one fails, the others still run.")];
+    let mut steps = Vec::new();
+    let mut requires_admin = false;
+    let mut technical = Vec::new();
+    if has(Source::Apt, None) {
+        match apt_upgrade_plan() {
+            Ok((invocation, proof, lines)) => {
+                requires_admin = true;
+                for line in lines { if line.contains('\n') { technical.push(line) } else { details.push(line) } }
+                steps.push(CheckStep { name: "APT".into(), run: StepRun::Command(invocation), proof });
+            },
+            Err(error) => details.push(tr!("{} is skipped: {}", "APT", error)),
+        }
+    }
+    for scope in ["user", "system"] {
+        if !has(Source::Flatpak, Some(scope)) { continue; }
+        match flatpak_update_all_plan(scope) {
+            Ok((invocation, proof, detail)) => {
+                requires_admin |= scope == "system";
+                details.push(detail);
+                steps.push(CheckStep { name: format!("Flatpak ({})", if scope == "user" { tr!("user") } else { tr!("system") }), run: StepRun::Command(invocation), proof });
+            },
+            Err(error) => details.push(tr!("{} is skipped: {}", "Flatpak", error)),
+        }
+    }
+    let mut snaps = 0;
+    for package in updates.iter().filter(|p| p.source == Source::Snap) {
+        match snap_plan(Some(package.clone()), "update") {
+            Ok((invocation, proof, _, admin)) => {
+                requires_admin |= admin; snaps += 1;
+                steps.push(CheckStep { name: format!("Snap {}", package.name), run: StepRun::Command(invocation), proof });
+            },
+            Err(error) => details.push(tr!("{} is skipped: {}", format!("Snap {}", package.name), error)),
+        }
+    }
+    if snaps > 0 { details.push(tr!("Snap: {} apps, each updated on its own with the checks of a single update (strict confinement, stable channel, identity checked again).", snaps)); }
+    let mut appimages = 0;
+    for package in updates.iter().filter(|p| p.source == Source::Appimage) {
+        match crate::appimage::plan(package, "update") {
+            Ok((prepared, _)) => { appimages += 1; steps.push(CheckStep { name: format!("AppImage {}", package.name), run: StepRun::Appimage(Box::new(prepared)), proof: Proof::None }); },
+            Err(error) => details.push(tr!("{} is skipped: {}", format!("AppImage {}", package.name), error)),
+        }
+    }
+    if appimages > 0 { details.push(tr!("AppImage: {} apps, each downloaded from its latest GitHub release and verified like a single update.", appimages)); }
+    if steps.is_empty() { return Err(tr!("There is nothing to update.")); }
+    if requires_admin { details.push(tr!("The system may ask for your password once for each step that changes system software.")); }
+    details.push(tr!("The confirmation is valid for 2 minutes and a single run."));
+    details.extend(technical);
+    let info = OperationInfo { action: "update-all".into(), label: String::new(), source: "all".into() };
+    store_plan(Invocation::new("nexa-store", &["update-all"]), Proof::Check(steps), info, tr!("Update everything"), details, requires_admin)
+}
+
 pub fn prepare_operation(package: Option<Package>, action: String, source: Option<String>) -> Result<Plan> {
     ensure_supported()?;
     if MUTATING.load(Ordering::Acquire) { return Err(tr!("Another operation is in progress. Wait for it to finish.")); }
     if !matches!(action.as_str(),"install"|"remove"|"update"|"refresh") { return Err(tr!("Invalid action.")); }
     if action == "refresh" && package.is_none() && source.as_deref() == Some("all") { return check_plan(); }
+    if action == "update" && package.is_none() && source.as_deref() == Some("all") { return update_all_plan(); }
     let selected_source = match (&package,source.as_deref()) {
         (Some(p),None) => p.source,
         (Some(p),Some("apt")) if p.source == Source::Apt => Source::Apt,
@@ -1355,6 +1477,7 @@ fn run_step(step: &CheckStep, refresh_with_packagekit: &dyn Fn() -> packagekit::
                 Ok((captured.success, format!("{}\n{}", tr!("PackageKit could not do it ({}); asking for administrator authentication instead.", reason.trim()), finished_text(&captured))))
             },
         },
+        StepRun::Appimage(prepared) => Ok(crate::appimage::execute(prepared)),
     }
 }
 
@@ -1549,7 +1672,7 @@ mod tests {
         assert!(operation_info("0".repeat(64).as_str()).is_none());
         PLANS.get().unwrap().lock().unwrap().remove(&token);
     }
-    fn step(name: &'static str, script: &str) -> CheckStep { CheckStep { name, run: StepRun::Command(Invocation::new("/bin/sh", &["-c", script])), proof: Proof::None } }
+    fn step(name: &str, script: &str) -> CheckStep { CheckStep { name: name.into(), run: StepRun::Command(Invocation::new("/bin/sh", &["-c", script])), proof: Proof::None } }
 
     #[test]
     fn an_update_check_runs_every_step_and_reports_each_one() {
@@ -1561,13 +1684,13 @@ mod tests {
         assert!(!partial.success, "one failed step makes the check incomplete");
         assert!(partial.output.contains("== APT: failed ==\nError executing command") && partial.output.contains("== Flatpak: done ==\nmetadata updated") && partial.output.contains("== Snap: failed =="), "{}", partial.output);
         assert!(partial.output.contains("Operation cancelled or failed"), "a step with no output still says something: {}", partial.output);
-        let missing = run_check(&[CheckStep { name: "APT", run: StepRun::Command(Invocation::new("/nonexistent/program", &[])), proof: Proof::None }, step("Snap", "echo ok")]).unwrap();
+        let missing = run_check(&[CheckStep { name: "APT".into(), run: StepRun::Command(Invocation::new("/nonexistent/program", &[])), proof: Proof::None }, step("Snap", "echo ok")]).unwrap();
         assert!(!missing.success && missing.output.contains("Cannot start") && missing.output.contains("== Snap: done =="), "{}", missing.output);
     }
 
     fn packagekit_step(marker: &std::path::Path) -> CheckStep {
         let fallback = Invocation::new("/bin/sh", &["-c", &format!("touch {}; echo apt-get update done", marker.display())]);
-        CheckStep { name: "APT", run: StepRun::PackageKit { fallback }, proof: Proof::None }
+        CheckStep { name: "APT".into(), run: StepRun::PackageKit { fallback }, proof: Proof::None }
     }
 
     #[test]
@@ -1592,8 +1715,8 @@ mod tests {
     #[test]
     fn an_update_check_plan_shows_every_command_and_only_needs_the_password_for_apt() {
         let steps = vec![
-            CheckStep { name: "APT", run: StepRun::PackageKit { fallback: Invocation::new("/usr/bin/pkexec", &["/usr/bin/apt-get", "update"]) }, proof: Proof::None },
-            CheckStep { name: "Snap", run: StepRun::Command(Invocation::new("/usr/bin/snap", &["refresh", "--list"])), proof: Proof::None },
+            CheckStep { name: "APT".into(), run: StepRun::PackageKit { fallback: Invocation::new("/usr/bin/pkexec", &["/usr/bin/apt-get", "update"]) }, proof: Proof::None },
+            CheckStep { name: "Snap".into(), run: StepRun::Command(Invocation::new("/usr/bin/snap", &["refresh", "--list"])), proof: Proof::None },
         ];
         let info = OperationInfo { action: "check".into(), label: String::new(), source: "all".into() };
         let plan = store_plan(Invocation::new("nexa-store", &["check"]), Proof::Check(steps), info, "Check for updates".into(), vec![], false).unwrap();
@@ -1656,6 +1779,19 @@ mod tests {
     fn flatpak_parser_preserves_scope_and_full_ref() {
         let rows=parse_flatpak_list("org.gimp.GIMP\tGIMP\tImage editor\t3.2\tflathub\tapp/org.gimp.GIMP/x86_64/stable\n","system");
         assert_eq!(rows.len(),1); assert_eq!(rows[0].scope.as_deref(),Some("system")); assert!(rows[0].id.starts_with("app/"));
+    }
+    #[test]
+    fn upgrade_targets_pin_the_listed_version_and_skip_held_or_odd_lines() {
+        let listing = "Listing...\n\
+            firefox/noble-updates 131.0+build1-0ubuntu1 amd64 [upgradable from: 130.0]\n\
+            libfoo1/noble-updates 2:1.2-3 i386 [upgradable from: 2:1.2-2]\n\
+            fonts-x/noble 1.1 all [upgradable from: 1.0]\n\
+            held-pkg/noble 2.0 amd64 [upgradable from: 1.0]\n\
+            bad;name/noble 1.0 amd64 [upgradable from: 0.9]\n\
+            weird/noble 1.0$(x) amd64 [upgradable from: 0.9]\n\
+            installed/noble 1.0 amd64 [installed]\n";
+        let held: HashSet<String> = ["held-pkg".to_string()].into_iter().collect();
+        assert_eq!(apt_upgrade_targets(listing, &held), vec!["firefox:amd64=131.0+build1-0ubuntu1", "libfoo1:i386=2:1.2-3", "fonts-x=1.1"]);
     }
     #[test]
     fn debian_family_is_read_from_id_and_id_like() {

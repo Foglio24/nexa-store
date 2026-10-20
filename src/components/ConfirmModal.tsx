@@ -13,6 +13,7 @@ export default function ConfirmModal({ plan, action, source, running, onCancel, 
   const summary = plan.details.filter(detail => !detail.includes('\n') && detail.length <= 500);
   const destructive = action === 'remove';
   const confirmLabel = action === 'refresh' && source === 'all' ? t('Check for updates')
+    : action === 'update' && source === 'all' ? t('Update all')
     : action === 'refresh' && source === 'snap' ? t('Check')
     : action === 'install' ? t('Install and confirm')
     : action === 'remove' ? t('Remove and confirm')

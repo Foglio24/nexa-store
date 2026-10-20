@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { CheckCircle2, RefreshCw } from 'lucide-react';
+import { CheckCircle2, Download, RefreshCw } from 'lucide-react';
 import type { AppGroup, KindFilter, SourceFilter, StorePackage } from '../types';
 import { useT } from '../i18n';
 import AppRow from '../components/AppRow';
@@ -22,7 +22,8 @@ export default function ListPage({ mode, filter, sources, refreshTick }: {
   const t = useT();
   const { desktop, prepare, busy } = useStore();
   const [source, setSource] = useState<SourceFilter>('all');
-  const [kind, setKind] = useState<KindFilter>('application');
+  // Updates of technical packages (libraries, system components) matter too: the Updates page shows everything.
+  const [kind, setKind] = useState<KindFilter>(mode === 'updates' ? 'all' : 'application');
   const command = mode === 'installed' ? 'list_installed' : 'list_updates';
   const request = useRequest(desktop ? () => invoke<StorePackage[]>(command, { source }) : null, [command, source, refreshTick, desktop]);
   const text = filter.trim().toLowerCase();
@@ -41,8 +42,10 @@ export default function ListPage({ mode, filter, sources, refreshTick }: {
         <Segmented label={t('Source')} value={source} onChange={setSource} options={sources.map(value => ({ value, label: value === 'all' ? t('All') : sourceLabels[value] }))} />
       </>} />
     {mode === 'updates' && <div className="toolbar">
-      <button className="btn btn-primary btn-sm" disabled={busy} onClick={() => prepare('refresh', undefined, 'all')}><RefreshCw size={14} />{t('Check for updates')}</button>
-      <span className="toolbar-label">{t('Refreshes the APT lists, the Flatpak catalog and the Snap list, then shows what can be updated.')}</span>
+      <button className="btn btn-primary btn-sm" data-testid="update-all" disabled={busy || (source === 'all' && !!request.data && request.data.length === 0)}
+        onClick={() => prepare('update', undefined, 'all')}><Download size={14} />{source === 'all' && request.data?.length ? t('Update all ({})', request.data.length) : t('Update all')}</button>
+      <button className="btn btn-secondary btn-sm" disabled={busy} onClick={() => prepare('refresh', undefined, 'all')}><RefreshCw size={14} />{t('Check for updates')}</button>
+      <span className="toolbar-label">{t('“Update all” installs every update of every source in one go; “Check for updates” refreshes the lists first.')}</span>
     </div>}
     {request.error ? <ErrorState message={request.error} onRetry={request.reload} />
       : request.loading && !request.data ? <SkeletonGrid rows count={7} />

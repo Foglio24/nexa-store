@@ -2,13 +2,13 @@
 
 # Nexa Store
 
-A desktop app store for **Debian, Ubuntu and the distributions based on them** (Linux Mint, Pop!_OS, Zorin OS, elementary OS, MX Linux, Kali, Raspberry Pi OS, AnduinOS, …): **search, discover and manage software from APT, Flatpak, Snap and AppImage** in one interface, with a confirmation before every change. Built with **Tauri 2, React, TypeScript and Rust**. Light and dark themes follow the system.
+A desktop app store for **Debian, Ubuntu and the distributions based on them** (Linux Mint, Pop!_OS, Zorin OS, elementary OS, MX Linux, Kali, Raspberry Pi OS, AnduinOS, …): **search, discover and manage software from APT, Flatpak, Snap and AppImage** in one interface, with a confirmation before every change. Built with **Tauri 2, React, TypeScript and Rust**. The look follows GNOME's Adwaita style, and light and dark themes follow the system.
 
 > **Language:** the interface follows the system language. It is shown in **Italian** when the system language is Italian and in **English** for every other language. See [Language](#language).
 
 <p align="center">
-  <img src="docs/screenshots/home-dark.png" alt="Explore page, dark theme" width="49%" />
-  <img src="docs/screenshots/home-light.png" alt="Explore page, light theme" width="49%" />
+  <img src="docs/screenshots/home-dark.png" alt="Explore page" width="49%" />
+  <img src="docs/screenshots/updates-dark.png" alt="Update all: one confirmation for every update" width="49%" />
 </p>
 
 ## Features
@@ -19,6 +19,7 @@ A desktop app store for **Debian, Ubuntu and the distributions based on them** (
 - **Available in English and Italian**, following the system language.
 - **Search** by name – apps first, with the real name and **logo**; libraries and technical packages stay apart and can be included.
 - **Installed** and **Updates** lists with removal and per-app updates, and an **Open** button to start installed apps.
+- **"Update all"** installs every available update in one confirmation: the APT packages in a single upgrade (only the versions listed, never a removal, held packages left alone), each Flatpak installation, each Snap and each AppImage. Every step is checked again right before it starts, and one that fails does not stop the others.
 - **One "Check for updates" button**: it refreshes the APT package lists (so updates from third-party repositories show up too), the Flatpak catalog and the Snap list in one go, then shows what can be updated. The APT lists are refreshed through PackageKit, like the system's software updater does, so **no password is asked**. Without the button the page only reads the lists already on the computer.
 - **Summary and confirmation** before every change, with dependencies, permissions and the exact command available.
 - **Operations that keep going with the window closed** – you can close the store while it installs, and a **notification** tells you when it is done.
@@ -159,11 +160,13 @@ An AppImage is a single executable file with no package manager, no sandbox and 
 
 The backend validates identifiers and starts executables with explicit arguments; it never accepts arbitrary shell commands from the frontend. Every operation must be prepared, shown to the user and confirmed; plans expire after **2 minutes** and can be used **once**. State is checked again before execution. A single instance of the app runs one change at a time.
 
-**APT.** The plan contains a real simulation, repeated before execution. Installs and upgrades are blocked if they require removals. Removing critical components, Essential/Protected packages or high-priority packages, and operations that remove more than 20 packages, are blocked. Local configuration is kept; no purge, autoremove or global upgrade is ever run. Search relies on local indexes and also includes libraries and command-line tools.
+**APT.** The plan contains a real simulation, repeated before execution. Installs and upgrades are blocked if they require removals. Removing critical components, Essential/Protected packages or high-priority packages, and operations that remove more than 20 packages, are blocked. Local configuration is kept; no purge, autoremove, `dist-upgrade` or `full-upgrade` is ever run. "Update all" upgrades exactly the packages `apt list --upgradable` shows, each pinned to the listed version, with `--only-upgrade --no-remove`, after a simulation that is repeated right before it runs; held packages are left out. Search relies on local indexes and also includes libraries and command-line tools.
 
 **Flatpak.** No remote is added automatically. New installs go to the scope of the remote that offers the app: per user from a user remote, system-wide from a system remote (Linux Mint, Pop!_OS, Zorin OS, elementary OS, AnduinOS and others configure Flathub that way; Flatpak's own polkit policy decides whether a password is needed). Updates and removals keep the scope of the installed app. The confirmation shows the ref, the commit and the declared permissions. Updates pin the approved commit. For new installs Flatpak offers no option to pin the commit, so the ref, the commit and the remote configuration are checked again right before starting. Runtimes and dependencies are resolved by Flatpak during the transaction.
 
 **Check for updates.** It runs, one after the other and each with its own re-check right before it starts, the APT list refresh, `flatpak update --appstream` (`--user` when only user remotes exist) and `snap refresh --list`. The APT lists are refreshed with a single D-Bus call to PackageKit (`RefreshCache`): PackageKit's polkit rule `org.freedesktop.packagekit.system-sources-refresh` lets a person using the computer do that without a password, and Nexa Store adds no rule, helper or privileged code. If PackageKit is missing or refuses, it falls back to `pkexec apt-get update` and says so (that one asks for the password). A source that is missing or cannot be refreshed is skipped and said so; a step that fails does not stop the others and the result lists each step. It installs and upgrades nothing, and a notification says how many updates were found. Installing, updating and removing APT packages still asks for the administrator password, on purpose.
+
+**Update all.** One confirmation lists every step; each step is checked again right before it starts and runs only if nothing changed (the APT simulation, the Flatpak remotes, each Snap's identity, channel and revision). APT runs as one `pkexec apt-get --only-upgrade --no-remove install` of the listed versions. Each Flatpak installation with updates runs `flatpak update` (`--user`, or `--system` where polkit may ask for a password); unlike a single update it takes the latest commit of each app and runtime rather than a pinned one, and it adds no remote and removes no runtime. Each Snap and each AppImage is updated on its own, with the checks of a single update. The system may ask for the password once per step that changes system software. A failed step (a cancelled password prompt, no network) is reported and the others still run.
 
 **Snap.** Only apps with **strict** confinement from the **stable** channel can be managed. Operations concern a single name: there is no global `snap refresh`. Classic, devmode and system components (kernel, gadget, base and snapd types) are excluded. The app's identity and conditions are checked again before execution. snapd keeps its own automatic-update policy; Nexa Store does not reconfigure it.
 

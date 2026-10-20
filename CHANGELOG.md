@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.0 — 2026-10-20
+
+"Update all", a GNOME look and a new icon.
+
+- **"Update all" button** on the Updates page, next to "Check for updates": one confirmation installs every update the page lists. APT goes in a single `apt-get --only-upgrade --no-remove install` of the listed versions (simulated first and again right before running; held packages are left out; nothing is removed). Each Flatpak installation with updates runs `flatpak update`, and each Snap and each AppImage is updated on its own with the checks of a single update. A step that fails does not stop the others, the Operations page lists each step, and a notification says when everything is done.
+- **New look, modelled on GNOME's Adwaita**: neutral window and sidebar colors, white cards with soft shadows instead of borders, lists grouped in one card with separators (like GNOME Settings), flat neutral buttons with the blue accent kept for the main action, a lighter featured banner and toasts like GNOME's. Light and dark themes still follow the system.
+- **New icon**: a grid of colorful app tiles on a dark base, the round tile carrying a download arrow.
+- The Updates page shows every update by default (apps and technical packages), so it no longer says "Everything is up to date" while system packages are waiting.
+- Long values in the confirmation (remote addresses, commits) wrap instead of overflowing; the "Technical package" tag no longer touches the name.
+- `scripts/test-gui.py` checks the "Update all" confirmation (opened and cancelled) and works on systems without Snap.
+
 ## 0.7.0 — 2026-10-19
 
 Every Debian or Ubuntu based distribution, not only Ubuntu.

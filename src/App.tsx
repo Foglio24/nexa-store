@@ -106,15 +106,16 @@ function App() {
     const current = plan;
     // Checking for updates ends on the Updates page, with what it found.
     const isCheck = planAction === 'refresh' && planSource === 'all';
+    const isUpdateAll = planAction === 'update' && planSource === 'all';
     const activityId = Date.now();
     setActivities(items => [{ id: activityId, title: current.title, status: 'running', output: t('Operation in progress. The full output will be available when it ends.'), startedAt: new Date() }, ...items]);
     setPlan(null); setView('activity'); setCategory(null); setQuery('');
     try {
       const result = await invoke<OperationResult>('execute_operation', { token: current.token });
       setActivities(items => items.map(item => item.id === activityId ? { ...item, status: result.success ? 'success' : 'error', output: result.output || (result.success ? t('Operation completed.') : t('Operation did not complete.')) } : item));
-      setNotice(isCheck && result.success ? t('Update check finished.') : result.success ? t('Operation completed.') : t('Operation did not complete: see the details.'));
+      setNotice(isCheck && result.success ? t('Update check finished.') : isUpdateAll && result.success ? t('All updates were installed.') : result.success ? t('Operation completed.') : t('Operation did not complete: see the details.'));
       setRefreshTick(value => value + 1); void loadSystem();
-      if (isCheck && result.success) setView('updates');
+      if ((isCheck || isUpdateAll) && result.success) setView('updates');
     } catch (cause) {
       setActivities(items => items.map(item => item.id === activityId ? { ...item, status: 'error', output: errorText(cause) } : item));
       setOperationError(errorText(cause));

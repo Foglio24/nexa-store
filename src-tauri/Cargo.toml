@@ -1,6 +1,6 @@
 [package]
 name = "nexa-store"
-version = "0.7.0"
+version = "0.8.0"
 description = "Nexa Store: an app store for Debian, Ubuntu and their derivatives (APT, Flatpak, Snap and AppImage)"
 license = "MIT"
 repository = "https://github.com/Foglio24/nexa-store"

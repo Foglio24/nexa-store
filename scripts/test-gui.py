@@ -88,11 +88,16 @@ def modal_open(): return js('return !!document.querySelector("[role=dialog]")')
 
 
 LANGUAGE = os.environ.get('NEXA_LANG', 'en')
+# Snap is optional: many Debian-based systems ship without it.
+SNAP = shutil.which('snap') is not None
+FILTER = 'Snap' if SNAP else 'Flatpak'
 L = {
     'en': dict(clear='Clear search', more='Show more apps', games='Games', source='Source', all='All', kind='Type', packages='Packages', everything='Everything',
-               install='Install', cancel='Cancel', installed='Installed', updates='Updates', remove='Remove', open='Open ', utilities='Utilities', explore='Explore', check='Check for updates', operations='Operations', done='done'),
+               install='Install', cancel='Cancel', installed='Installed', updates='Updates', remove='Remove', open='Open ', utilities='Utilities', explore='Explore', check='Check for updates', operations='Operations', done='done',
+               updateall='Update all', updateall_title='Update everything'),
     'it': dict(clear='Cancella ricerca', more='Mostra altre app', games='Giochi', source='Sorgente', all='Tutte', kind='Tipo', packages='Pacchetti', everything='Tutto',
-               install='Installa', cancel='Annulla', installed='Installate', updates='Aggiornamenti', remove='Rimuovi', open='Apri ', utilities='Utilità', explore='Esplora', check='Controlla aggiornamenti', operations='Operazioni', done='fatto'),
+               install='Installa', cancel='Annulla', installed='Installate', updates='Aggiornamenti', remove='Rimuovi', open='Apri ', utilities='Utilità', explore='Esplora', check='Controlla aggiornamenti', operations='Operazioni', done='fatto',
+               updateall='Aggiorna tutto', updateall_title='Aggiorna tutto'),
 }[LANGUAGE]
 env = dict(os.environ, GDK_BACKEND='x11', NEXA_LANG=LANGUAGE)
 drv = subprocess.Popen([DRIVER, '--port', str(PORT), '--native-port', str(PORT + 1)], env=env,
@@ -120,7 +125,8 @@ try:
     sections = js('return [...document.querySelectorAll(".section-title")].map(x=>x.textContent.trim())')
     assert len(sections) >= 5, sections
     note('home: highlighted app and sections', {'highlighted': hero, 'sections': sections})
-    wait('return document.querySelectorAll(".dot.on").length>=4')
+    # APT, Flatpak and AppImage, plus Snap where the system has it (many Debian-based systems do not).
+    wait(f'return document.querySelectorAll(".dot.on").length>={4 if SNAP else 3}')
     shot('10-home.png')
     cards = js(CARDS)
     scroll_through()
@@ -155,11 +161,11 @@ try:
     note('category Games', {'cards': len(games), 'total': count, 'with_logo': sum(c['logo'] for c in games), 'sources': sorted({s for c in games for s in c['sources']})})
     assert sum(c['logo'] for c in games) >= len(games) * 0.9
     shot('11-category-games.png')
-    click_text('Snap', f'document.querySelector(".segmented[aria-label={L["source"]}]")')
+    click_text(FILTER, f'document.querySelector(".segmented[aria-label={L["source"]}]")')
     time.sleep(1); settle(12)
-    only_snap = js(CARDS)
-    assert only_snap and all(c['sources'] == ['Snap'] for c in only_snap), 'Snap filter not respected'
-    note('category Games, Snap only', {'cards': len(only_snap), 'examples': [c['name'] for c in only_snap[:4]]})
+    only_one = js(CARDS)
+    assert only_one and all(c['sources'] == [FILTER] for c in only_one), f'{FILTER} filter not respected'
+    note(f'category Games, {FILTER} only', {'cards': len(only_one), 'examples': [c['name'] for c in only_one[:4]]})
     click_text(L['all'], f'document.querySelector(".segmented[aria-label={L["source"]}]")')
     js('document.querySelector(".back-link").click()')
     wait('return !!document.querySelector(".hero-body h2")')
@@ -169,7 +175,7 @@ try:
     rows = js(CARDS)
     first = rows[0]
     assert first['name'] and ('GNU Image' in first['name'] or 'GIMP' in first['name'].upper()), f'the first result is not GIMP: {first}'
-    assert {'APT', 'Flatpak', 'Snap'} <= set(first['sources']), first
+    assert ({'APT', 'Flatpak', 'Snap'} if SNAP else {'APT', 'Flatpak'}) <= set(first['sources']), first
     assert all(not r['tech'] for r in rows) and not any(r['name'] == 'gimp-data' for r in rows)
     assert first['logo'], 'GIMP without a logo'
     note('search gimp (apps only)', {'first': first, 'results': len(rows)})
@@ -187,7 +193,7 @@ try:
     js('document.querySelector(".app-row .app-row-main").click()')
     wait('return !!document.querySelector("[role=dialog] .detail-description")', 60)
     variants = js('return [...document.querySelectorAll("[role=dialog] .variant-picker button")].map(b=>b.textContent.trim())')
-    assert len(variants) == 3, variants
+    assert len(variants) == (3 if SNAP else 2), variants
 
     apt_description = js('return document.querySelector(".detail-description").textContent')
     assert len(apt_description) > 100 and '\n\n' in apt_description or len(apt_description) > 100
@@ -259,13 +265,30 @@ try:
     note('installed: Open button', {'apps_with_open': len(opens), 'examples': opens[:3]})
     shot('16-installed.png')
 
-    # ---- Updates: one button checks every source. Its confirmation is opened and cancelled: the APT part
-    # would ask for the administrator password, so this script never runs it.
+    # ---- Updates: "Update all" installs every update, "Check for updates" refreshes every source. Both
+    # confirmations are opened and cancelled: they would ask for the administrator password.
     js('[...document.querySelectorAll(".nav-item")].find(b=>b.getAttribute("aria-label")==="' + L['updates'] + '").click()')
     wait('return !!document.querySelector(".toolbar")', 60)
     buttons = js('return [...document.querySelectorAll(".toolbar button")].map(b=>b.textContent.trim())')
-    assert buttons == [L['check']], f'the Updates page must offer one check button, found {buttons}'
+    assert len(buttons) == 2 and buttons[0].startswith(L['updateall']) and buttons[1] == L['check'], f'the Updates page must offer "update all" and the check, found {buttons}'
     shot('17-updates.png')
+    if js('return !document.querySelector("[data-testid=update-all]").disabled'):
+        js('document.querySelector("[data-testid=update-all]").click()')
+        wait('return document.querySelector("[data-testid=confirm-operation]")!==null || !!document.querySelector(".alert-error")', 120)
+        if js('return !!document.querySelector("[data-testid=confirm-operation]")'):
+            plan = js('return {title:document.querySelector(".confirm-title").textContent, command:document.querySelector(".command-preview pre").textContent, button:document.querySelector("[data-testid=confirm-operation]").textContent}')
+            lines = plan['command'].splitlines()
+            assert plan['title'] == L['updateall_title'] and plan['button'] == L['updateall'], plan
+            # APT goes in one --only-upgrade --no-remove run; nothing is ever purged or autoremoved.
+            assert all('--only-upgrade' in line and '--no-remove' in line for line in lines if 'apt-get' in line), lines
+            assert not any(word in plan['command'] for word in (' purge', ' autoremove', ' dist-upgrade', ' full-upgrade')), lines
+            note('update all confirmation', {'commands': lines})
+            time.sleep(0.8)  # let the dialog finish fading in
+            shot('17b-update-all.png')
+            click_text(L['cancel'])
+            assert not modal_open()
+        else:
+            note('update all', {'error': js('return document.querySelector(".alert-error").textContent')})
     click_text(L['check'], 'document.querySelector(".toolbar")')
     wait('return document.querySelector("[data-testid=confirm-operation]")!==null', 60)
     plan = js('return {title:document.querySelector(".confirm-title").textContent, badge:!!document.querySelector(".confirm-head .source-badge"), command:document.querySelector(".command-preview pre").textContent, button:document.querySelector("[data-testid=confirm-operation]").textContent, details:[...document.querySelectorAll(".plan-details li")].length}')
@@ -273,7 +296,7 @@ try:
     assert plan['title'] == L['check'] and not plan['badge'] and plan['button'] == L['check'], plan
     # The APT lists are refreshed through PackageKit (no password) when the system has it, else with pkexec.
     assert any('PackageKit' in line and 'RefreshCache' in line for line in lines) or any('apt-get' in line and 'update' in line and 'pkexec' in line for line in lines), lines
-    assert any('snap refresh --list' in line for line in lines), lines
+    assert not SNAP or any('snap refresh --list' in line for line in lines), lines
     assert not any(word in plan['command'] for word in ('upgrade', 'install', 'remove', 'autoremove')), lines
     note('update check confirmation', {'commands': lines, 'details': plan['details']})
     shot('18-update-check.png')
@@ -293,7 +316,7 @@ try:
         wait('return !!document.querySelector(".activity-card")', 30)
         output = js('return document.querySelector(".activity-card pre").textContent')
         assert js('return !!document.querySelector(".activity-card.success")'), output
-        assert all(f'== {name}: {L["done"]} ==' in output for name in ('APT', 'Flatpak', 'Snap')), output
+        assert all(f'== {name}: {L["done"]} ==' in output for name in ('APT', 'Flatpak', 'Snap')[:3 if SNAP else 2]), output
         note('update check output', {'output': output[:500]})
     ok = True
 finally:

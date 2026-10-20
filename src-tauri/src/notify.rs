@@ -51,6 +51,10 @@ pub fn finished_message(action: &str, label: &str, success: bool) -> (String, St
         return if success { (tr!("Update check finished"), tr!("Nexa Store has refreshed the lists and looked for updates.")) }
             else { (tr!("Update check failed"), tr!("Open Nexa Store to see the details.")) };
     }
+    if action == "update-all" {
+        return if success { (tr!("Updates installed"), tr!("Nexa Store has installed every available update.")) }
+            else { (tr!("Some updates were not installed"), tr!("Open Nexa Store to see the details.")) };
+    }
     if !success {
         let summary = if action == "refresh" { tr!("Check of {} failed", label) } else { tr!("{}: operation failed", label) };
         return (summary, tr!("Open Nexa Store to see the details."));
@@ -81,6 +85,7 @@ pub fn background_message(action: &str, label: &str) -> (String, String) {
         "remove" => tr!("Removing {}. You'll get a notification as soon as it ends.", label),
         "update" => tr!("Updating {}. You'll get a notification as soon as it ends.", label),
         "check" => tr!("Checking for updates. You'll get a notification as soon as it ends."),
+        "update-all" => tr!("Installing every available update. You'll get a notification as soon as it ends."),
         _ => tr!("Checking {}. You'll get a notification as soon as it ends.", label),
     };
     (tr!("Nexa Store keeps going in the background"), text)
